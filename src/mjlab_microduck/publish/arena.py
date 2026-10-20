@@ -100,9 +100,9 @@ def _detail(e: urllib.error.HTTPError) -> str:
 
 def entered_line(event: str, entry: Entry) -> str:
     said = "already entered" if entry.already else "entered"
-    if entry.metric == "mean_hold_force":
-        # A tug's score is a rating in newtons, higher wins; it has no speed.
-        return f"[publish] {said} on {event}: a {entry.score:.2f} N rating → {entry.page_url}"
+    if entry.metric == "mean_ground_cm":
+        # A tug's score is centimetres of marker against the reference duck, higher wins; it has no speed.
+        return f"[publish] {said} on {event}: a {entry.score:.1f} cm rating → {entry.page_url}"
     if entry.course == "stage":
         # A performance has no time, seeds or speed: its length is the only number it has.
         played = f"a {entry.score:.2f} s performance" if entry.seeds_finished else "a performance cut short"

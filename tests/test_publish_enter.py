@@ -317,6 +317,6 @@ def test_a_stage_entry_is_said_as_a_performance(tmp_path, monkeypatch, fake_mjla
 
 
 def test_a_tug_entry_is_said_as_a_rating(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, arena, capsys):
-    arena.reply["body"] = json.dumps(ENTERED | {"score": 4.2134, "course": "tug", "metric": "mean_hold_force"})
+    arena.reply["body"] = json.dumps(ENTERED | {"score": 12.34, "course": "tug", "metric": "mean_ground_cm"})
     assert _publish(tmp_path, monkeypatch, arena=arena.url) == 0
-    assert f"[publish] entered on sprint-2m: a 4.21 N rating → {PAGE}" in capsys.readouterr().out
+    assert f"[publish] entered on sprint-2m: a 12.3 cm rating → {PAGE}" in capsys.readouterr().out
