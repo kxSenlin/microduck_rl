@@ -1,0 +1,145 @@
+{
+  "schema_version": 2,
+  "model_api": 1,
+  "obs_len": 61,
+  "action_len": 14,
+  "robot": {
+    "model": "microduck",
+    "hw_rev": 1,
+    "servos": "xl330",
+    "control_hz": 50
+  },
+  "description": "The policy set a microduck ships with: walking, standing, and the one-shots its buttons run.",
+  "policies": [
+    {
+      "file": "alpha_walking.onnx",
+      "kind": "perpetual"
+    },
+    {
+      "file": "velstand.onnx",
+      "kind": "perpetual",
+      "slot": "walk",
+      "entry_pose": "standing",
+      "description": "Walking gait that also stands still at zero command; the default walk policy since v5, with no separate standing network. From v7 the body is steerable while standing: the body_pose roll/pitch command tilts the trunk (about +-10 deg), as alpha_stand did. From v8 it gets up from a fall smoothly and reliably instead of violently or getting stuck on its back, and yaw commands are tracked (turning in place and while walking now reaches the commanded rate).",
+      "training": {
+        "task_id": "Mjlab-VelStand-Rough-Backlash-MicroDuck",
+        "repo": "pollen-robotics/microduck_rl",
+        "commit": "3750776",
+        "branch": "improve_standup_velstand",
+        "dirty": false,
+        "run": "pollen-robotics/mjlab_microduck/0045i2si",
+        "checkpoint": 2749,
+        "exported": "2026-10-12T00:00:00Z"
+      }
+    },
+    {
+      "file": "alpha_stand.onnx",
+      "kind": "perpetual"
+    },
+    {
+      "file": "roller.onnx",
+      "kind": "perpetual",
+      "mode": "roller",
+      "action_scale": 0.8
+    },
+    {
+      "file": "alpha_sitstand.onnx",
+      "name": "sitstand",
+      "kind": "scripted",
+      "command": {
+        "encoding": "posture_flag",
+        "slot": "twist.vx",
+        "sit": 1.0,
+        "stand": 0.0,
+        "idle": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "ramp_s": 2.0,
+      "unwind_s": 1.0,
+      "description": "Gentle sit and stand, head steerable while seated. From v6 it no longer tips over backward when the head moves abruptly while seated.",
+      "training": {
+        "task_id": "Mjlab-SitStand-Flat-MicroDuck",
+        "repo": "pollen-robotics/microduck_rl",
+        "commit": "77ffadf",
+        "branch": "sitstand_no_fall_back",
+        "dirty": false,
+        "run": "pollen-robotics/mjlab_microduck/vfhxgrum",
+        "checkpoint": 2250,
+        "exported": "2026-10-01T00:00:00Z"
+      }
+    },
+    {
+      "file": "static_ground_pick.onnx",
+      "name": "ground_pick",
+      "kind": "episodic",
+      "duration_s": 2.8,
+      "command": {
+        "encoding": "phase",
+        "slots": "twist.vx,twist.vy",
+        "period_s": 4.0,
+        "end_phase": 0.7
+      },
+      "mouth": {
+        "open": 0.775,
+        "close_phase": 0.34
+      },
+      "entry_pose": "standing",
+      "description": "The A-button pick from v9: the static low grasp. Crouches until the open beak (22 deg) is about a centimetre above the floor with the centre of mass inside the feet, bites at phase 0.34 and stands up holding the object. The daemon plays its trained beak from `mouth`.",
+      "training": {
+        "task_id": "Mjlab-StaticGrasp-Hover-FromPick-MicroDuck",
+        "repo": "pollen-robotics/microduck_rl",
+        "commit": "666dab6",
+        "branch": "static-grasp",
+        "run": "pollen-robotics/mjlab_microduck/neoy2a9d",
+        "checkpoint": 1249,
+        "exported": "2026-10-26T00:00:00Z"
+      },
+      "eval": {
+        "sim": "exact training model, BAM XL330 servos, robotd's pick sequence (sg_eval.py)",
+        "grasps": "Lego, 2 cm block, die, pawn 3/3 each; AA battery 1/3; coin 0/3",
+        "balance": "centre of mass >= 0.84 cm inside the feet through the hold; frozen mid-hold on its own targets it stays up, beak 1.7-5.5 mm off the floor",
+        "beak": "hovers 10-17 mm while waiting, taps the floor 0.02-0.1 s as the jaw closes",
+        "targets": "at most 0.25 rad past a joint range"
+      }
+    },
+    {
+      "file": "alpha_ground_pick.onnx",
+      "description": "The A-button pick up to v8, kept in the set: robotctl policy load ground_pick /opt/robot/policies/current/alpha_ground_pick.onnx puts it back on a robot (no beak)."
+    },
+    {
+      "file": "roller_crouch.onnx",
+      "name": "crouch",
+      "kind": "episodic",
+      "duration_s": 3.5,
+      "mode": "roller",
+      "action_scale": 0.8,
+      "command": {
+        "encoding": "phase",
+        "slots": "twist.vx,twist.vy",
+        "period_s": 5.0,
+        "end_phase": 0.7
+      }
+    },
+    {
+      "file": "roulade.onnx",
+      "kind": "episodic",
+      "duration_s": 1.0,
+      "chain": true
+    },
+    {
+      "file": "ball_kick_left.onnx",
+      "name": "kick_left",
+      "kind": "episodic",
+      "duration_s": 0.5
+    },
+    {
+      "file": "ball_kick_right.onnx",
+      "name": "kick_right",
+      "kind": "episodic",
+      "duration_s": 0.5
+    }
+  ]
+}
