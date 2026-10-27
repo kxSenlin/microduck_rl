@@ -4,6 +4,7 @@ angle of the link).
 
   tap:    the walking policy, a stick tap (robotd path: EMA, low-pass, 0.9 scale): --twist vx,vy,wz for --tap-s
   nudge:  the walking policy standing, then the nudge skill(s) from --onnx with --units ax:u[,ax:u...] in sequence
+          (units after cde7159: x, y metres / 0.05, yaw radians / 0.25; robotd action scale 0.9 + low-pass)
   PYTHONPATH=src .venv-mjlab/bin/python scripts/precision/pm_record.py tap --twist 0.4,0,0 --tap-s 0.3 --envs 6 --out X.npz
 """
 import argparse
@@ -56,6 +57,7 @@ def main():
     ap.add_argument("--go", type=float, default=0.5)
     ap.add_argument("--unwind", type=float, default=1.3)
     ap.add_argument("--gap", type=float, default=0.6, help="walking policy at zero between two nudges")
+    ap.add_argument("--skill-scale", type=float, default=None, help="action scale while a nudge runs (default: robotd 0.9)")
     ap.add_argument("--before", type=float, default=1.0)
     ap.add_argument("--after", type=float, default=2.0)
     ap.add_argument("--envs", type=int, default=6)
@@ -84,7 +86,7 @@ def main():
             cmd = [0.0, 0.0, 0.0]
             cmd[AX[ax]] = float(u)
             events.append({"t": len(frames) * sim.dt, "what": f"nudge {ax} {u}"})
-            sim.action_scale = 1.0
+            sim.action_scale = a.skill_scale if a.skill_scale is not None else walk_scale
             for k in range(int(round((a.go + a.unwind) / sim.dt))):
                 tick(cmd if k * sim.dt < a.go - 1e-6 else [0.0, 0.0, 0.0], policy=nudge, smooth=False)
             sim.action_scale = walk_scale
