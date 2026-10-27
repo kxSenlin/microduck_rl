@@ -119,3 +119,9 @@ def test_discarded_outputs_are_priced_and_entropy_is_halved():
     cfg = make_microduck_nudge_env_cfg(runtime_layer=True)
     assert cfg.rewards["handover_imitation"].weight < 0.0
     assert nudge.MicroduckNudgeRuntimeRlCfg.algorithm.entropy_coef < nudge.MicroduckNudgeRlCfg.algorithm.entropy_coef
+
+
+def test_safe_variant_makes_falls_expensive():
+    cfg = make_microduck_nudge_env_cfg(runtime_layer=True, safe=True)
+    assert cfg.rewards["termination"].weight <= -100.0
+    assert cfg.terminations["fell_over"].params["limit_angle"] <= math.radians(45.0)

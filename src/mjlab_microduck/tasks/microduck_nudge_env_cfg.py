@@ -92,6 +92,11 @@ HANDOVER_POST_S = 0.5
 # 0.8 rad because the discarded outputs outside the skill cost nothing under the entropy bonus. Price them, and halve
 # the bonus.
 HANDOVER_IMITATION_WEIGHT = -5.0
+# Safe variant (fine-tune of run 5): run 5 @1000 fell in 1-4 of 48 tries per x/y nudge in the robotd-style eval
+# (spins in place then tips backward in the settle part), ~4 % of training episodes. Falls cost far more, and an
+# episode ends at a smaller tilt.
+SAFE_TERMINATION_WEIGHT = -100.0
+SAFE_FALL_ANGLE = math.radians(40.0)
 RUNTIME_ENTROPY_COEF = 0.005
 
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
@@ -99,7 +104,8 @@ DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "
 DROP_CURRICULA = ("standing_envs", "head_pose_bias_weight", "body_pose_range", "head_pose_range")
 
 
-def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtime_layer: bool = False) -> ManagerBasedRlEnvCfg:
+def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtime_layer: bool = False,
+                                 safe: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = make_microduck_velocity_env_cfg(play=play, rough=False)
     pre_s = HANDOVER_PRE_S if runtime_layer else PRE_S
     post_s = HANDOVER_POST_S if runtime_layer else 0.0
@@ -137,6 +143,11 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         if "action_rate_weight" in cfg.curriculum:
             cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
                 {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in RUNTIME_ACTION_RATE_STAGES]
+
+    if safe:
+        cfg.rewards["termination"].weight = SAFE_TERMINATION_WEIGHT
+        if "fell_over" in cfg.terminations:
+            cfg.terminations["fell_over"].params["limit_angle"] = SAFE_FALL_ANGLE
 
     cfg.episode_length_s = pre_s + GO_S + SETTLE_S + post_s
     cfg.events.pop("push_robot", None)
