@@ -82,12 +82,8 @@
         "period_s": 4.0,
         "end_phase": 0.7
       },
-      "mouth": {
-        "open": 0.775,
-        "close_phase": 0.34
-      },
       "entry_pose": "standing",
-      "description": "The A-button pick from v9: the static low grasp. Crouches until the open beak (22 deg) is about a centimetre above the floor with the centre of mass inside the feet, bites at phase 0.34 and stands up holding the object. The daemon plays its trained beak from `mouth`.",
+      "description": "The A-button pick from v9: the static low grasp. Crouches until the open beak (22 deg) is about a centimetre above the floor with the centre of mass inside the feet, bites at phase 0.34 and stands up holding the object. Needs a daemon that plays its beak (pollen-robotics/microduck#481).",
       "training": {
         "task_id": "Mjlab-StaticGrasp-Hover-FromPick-MicroDuck",
         "repo": "pollen-robotics/microduck_rl",
