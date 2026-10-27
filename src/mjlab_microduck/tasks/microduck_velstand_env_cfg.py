@@ -216,6 +216,7 @@ Phases (as before, but with a recovery backstop):
 """
 
 import math
+from pathlib import Path
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers import (
@@ -466,6 +467,14 @@ FOOT_CLEARANCE_MIN = 0.015            # PPO cost on the measured feet: box proxy
 FOOT_CLEARANCE_LABEL_MIN = 0.020      # teacher-label path projection (emulated: 15 mm → swing p50 +6, 25 mm → +9, rise kept)
 FOOT_CLEARANCE_LABEL_JOINTS = (0, 1, 2, 3, 4, 9, 10, 11, 12, 13)   # all leg joints (servo order)
 FOOT_CLEARANCE_COST_WEIGHT = -0.5     # per step at full deficit (fallen_tax is -0.5)
+# Stuck-state spawns (2026-10-27, run tf5v0sl3 eval): the still-on-side teacher unmask fixed
+# nothing (stuck rate = v8's at the best checkpoint, worse later) because those states were
+# 0.04 % of frames — the spawn mix almost never produces them. A share of the prone slice
+# now starts IN recorded stuck states (rise-battery end states of non-recovered episodes,
+# v8 + tf5v0sl3 checkpoints; data/velstand_stuck_states.npz).
+ENABLE_STUCK_SPAWNS = True
+STUCK_SPAWN_PROB = 0.3          # share of the prone slice (~1.5 % of frames: resets are rare, episodes ~20 s)
+STUCK_LIBRARY = str(Path(__file__).parent / "data" / "velstand_stuck_states.npz")
 ENABLE_WIDE_SPAWNS = True
 WIDE_JOINT_RANDOM_PROB = 0.5    # share of the prone slice with random servo joints
 WIDE_JOINT_RANGE_FRAC = 0.9
@@ -869,6 +878,8 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
                 "joint_range_frac": WIDE_JOINT_RANGE_FRAC,
                 "so3_prob": WIDE_SO3_PROB,
                 "sit_prob": WIDE_SIT_PROB,
+                "stuck_prob": STUCK_SPAWN_PROB if ENABLE_STUCK_SPAWNS else 0.0,
+                "stuck_params": {"library_path": STUCK_LIBRARY},
                 "sit_params": {
                     "sitting_joint_overrides": SIT_JOINT_OVERRIDES,
                     "sitting_joint_noise_std": 0.15,

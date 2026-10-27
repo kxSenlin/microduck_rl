@@ -38,3 +38,7 @@ backup_onnx/
 logdir/.claude/
 logdir/
 logdir/.claude/worktrees/
+
+# velstand stuck-state spawn library (shipped: HF Jobs read it from the source tree)
+!src/mjlab_microduck/tasks/data/
+!src/mjlab_microduck/tasks/data/velstand_stuck_states.npz

@@ -4629,8 +4629,13 @@ def maybe_set_random_prone_orientation(
     so3_extra_z: float = 0.04,
     sit_prob: float = 0.0,
     sit_params: Optional[dict] = None,
+    stuck_prob: float = 0.0,
+    stuck_params: Optional[dict] = None,
 ):
     """Reset event that overrides orientation to prone with probability `prone_prob`.
+
+    ``stuck_prob``: fraction of the prone slice reset by ``set_stuck_states`` (recorded
+    states where a policy froze) with ``stuck_params`` (``library_path`` required).
 
     ``so3_prob`` (2026-10, velstand stand-up coverage): fraction of the prone
     slice that gets a UNIFORMLY random orientation instead of an exact ±90°
@@ -4707,6 +4712,10 @@ def maybe_set_random_prone_orientation(
             if len(jr) > 0:
                 randomize_servo_joints_uniform(env, jr, asset_cfg=asset_cfg, range_frac=joint_range_frac)
                 env.sim.data.qpos[jr, 2] += joint_random_extra_z
+        if stuck_prob > 0.0:
+            st = selected[torch.rand(len(selected), device=env.device) < stuck_prob]
+            if len(st) > 0:
+                set_stuck_states(env, st, asset_cfg=asset_cfg, **(stuck_params or {}))
     if len(crouch_selected) > 0:
         set_random_crouch_state(env, crouch_selected, asset_cfg=asset_cfg)
     if len(sit_selected) > 0:
@@ -4714,6 +4723,62 @@ def maybe_set_random_prone_orientation(
             env, sit_selected, asset_cfg=asset_cfg,
             face_down_prob=0.0, face_up_prob=0.0, sitting_prob=1.0, standing_prob=0.0, **(sit_params or {}),
         )
+
+
+_STUCK_LIBRARY_CACHE: dict = {}
+
+
+def _stuck_library(path: str, device) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(quat wxyz (N,4), trunk z above the env origin (N,), servo joints (N,14)) from an .npz, cached."""
+    key = (str(path), str(device))
+    if key not in _STUCK_LIBRARY_CACHE:
+        import numpy as np
+
+        d = np.load(path)
+        _STUCK_LIBRARY_CACHE[key] = tuple(torch.as_tensor(d[k], dtype=torch.float32, device=device)
+                                          for k in ("quat", "z", "servo"))
+    return _STUCK_LIBRARY_CACHE[key]
+
+
+def set_stuck_states(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    library_path: str,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    extra_z: float = 0.02,
+    servo_noise_std: float = 0.05,
+):
+    """Reset ``env_ids`` into rest states where a policy got STUCK (velstand, 2026-10-27).
+
+    The library holds end states of rise-battery episodes that never recovered and had
+    stopped moving (trunk orientation, trunk height, servo joints), recorded from several
+    checkpoints. Those states are rare under the normal spawn mix (the still-on-side BC
+    rows were 0.04 % of frames), so neither PPO nor the teacher saw them. Each sampled
+    state gets a random world yaw, ``servo_noise_std`` of joint noise and ``extra_z`` of
+    clearance (it drops and settles back into the same basin); velocities are zeroed.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    quat, z, servo = _stuck_library(library_path, env.device)
+    n = len(env_ids)
+    pick = torch.randint(len(quat), (n,), device=env.device)
+    yaw = torch.rand(n, device=env.device) * 2 * math.pi
+    qy = torch.stack([torch.cos(yaw / 2), torch.zeros_like(yaw), torch.zeros_like(yaw), torch.sin(yaw / 2)], 1)
+    q = quat[pick]
+    w1, x1, y1, z1 = qy.unbind(1)
+    w2, x2, y2, z2 = q.unbind(1)
+    env.sim.data.qpos[env_ids, 3:7] = torch.stack([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2, w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2, w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ], 1)
+    env.sim.data.qpos[env_ids, 2] = z[pick] + extra_z + _env_origin_z(env, env_ids)
+    env.sim.data.qvel[env_ids, :6] = 0.0
+    ids = torch.as_tensor(_servo_joint_ids(env, asset), device=env.device, dtype=torch.long)
+    lim = asset.data.joint_pos_limits[env_ids][:, ids]
+    pos = asset.data.joint_pos[env_ids].clone()
+    pos[:, ids] = torch.clamp(servo[pick] + torch.randn(n, len(ids), device=env.device) * servo_noise_std,
+                              lim[..., 0], lim[..., 1])
+    asset.write_joint_position_to_sim(pos, env_ids=env_ids)
+    asset.write_joint_velocity_to_sim(torch.zeros_like(pos), env_ids=env_ids)
 
 
 def _uniform_random_quat(n: int, device) -> torch.Tensor:

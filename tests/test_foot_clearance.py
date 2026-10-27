@@ -129,3 +129,18 @@ def test_label_projection_leaves_clear_rows_bit_exact():
     with torch.no_grad():
         out = distill.project_label_clearance(a, torch.zeros_like(a), cfg)
     assert torch.equal(out, a)  # the expert_bc_label_projected_frac stat counts exact changes
+
+
+def test_velstand_stuck_spawns_wired():
+    import os
+
+    import numpy as np
+
+    assert vs.ENABLE_STUCK_SPAWNS and 0.0 < vs.STUCK_SPAWN_PROB <= 0.5
+    assert os.path.isfile(vs.STUCK_LIBRARY)  # shipped in the package: HF Jobs read it from the source tree
+    d = np.load(vs.STUCK_LIBRARY)
+    n = len(d["quat"])
+    assert n >= 100 and d["quat"].shape == (n, 4) and d["z"].shape == (n,) and d["servo"].shape == (n, 14)
+    np.testing.assert_allclose(np.linalg.norm(d["quat"], axis=1), 1.0, atol=1e-4)
+    p = vs.make_microduck_velstand_env_cfg().events["random_prone_init"].params
+    assert p["stuck_prob"] == vs.STUCK_SPAWN_PROB and p["stuck_params"]["library_path"] == vs.STUCK_LIBRARY
