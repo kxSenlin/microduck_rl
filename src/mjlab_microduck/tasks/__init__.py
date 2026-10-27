@@ -281,3 +281,71 @@ for _task_id, _make_cfg, _kw, _rl_cfg, _robot_cfg in _BACKLASH_TASKS:
         rl_cfg=_rl_cfg,
         runner_cls=MicroduckOnPolicyRunner,
     )
+
+# Precision nudge — one small exact move along one axis, deployed as robotd one-shot skills
+# (constant twist for the go window, zeros to finish). Actor warm-started from velstand v8.
+from pathlib import Path as _NudgePath  # noqa: E402
+
+from .microduck_nudge_env_cfg import (  # noqa: E402
+    make_microduck_nudge_env_cfg,
+    MicroduckNudgeRlCfg,
+)
+
+
+class NudgeFromVelstandRunner(MicroduckOnPolicyRunner):
+    """Actor MLP + observation normalizer copied from the deployed velstand v8 ONNX (same 61 -> 512 -> 256 -> 128 ->
+    14 ELU net; the exporter bakes (obs - mean) / (std + eps) into it), fresh critic (it sees the nudge error), a low
+    first learning rate and a small exploration std so the inherited stance is not shaken apart (the pattern of
+    GroundGraspFromPickRunner on branch ground-grasp). A real resume (--agent.resume) loads over this as usual."""
+
+    INIT_REPO, INIT_FILE, INIT_REV = "pollen-robotics/microduck-policies", "velstand.onnx", "v8"
+    INIT_STD = 0.25
+    INIT_LR = 1e-4
+
+    def __init__(self, env, train_cfg: dict, log_dir=None, device="cpu", **kwargs):
+        super().__init__(env, train_cfg, log_dir, device, **kwargs)
+        self._init_actor_from_onnx()
+
+    def _init_actor_from_onnx(self):
+        import onnx
+        import torch
+        from huggingface_hub import hf_hub_download
+        from onnx import numpy_helper
+
+        path = hf_hub_download(self.INIT_REPO, self.INIT_FILE, revision=self.INIT_REV)
+        init = {i.name: numpy_helper.to_array(i) for i in onnx.load(path).graph.initializer}
+        actor = self.alg.actor
+        sd = actor.state_dict()
+        std_key = next(k for k in init if k.startswith("onnx::Div"))
+        std = init[std_key] - actor.obs_normalizer.eps
+        new = {"obs_normalizer._mean": init["obs_normalizer._mean"], "obs_normalizer._std": std,
+               "obs_normalizer._var": std ** 2}
+        for k in ("mlp.0.weight", "mlp.0.bias", "mlp.2.weight", "mlp.2.bias", "mlp.4.weight", "mlp.4.bias",
+                  "mlp.6.weight", "mlp.6.bias"):
+            new[k] = init[k]
+        for k, v in new.items():
+            sd[k].copy_(torch.as_tensor(v, dtype=sd[k].dtype, device=sd[k].device).reshape(sd[k].shape))
+        sd["obs_normalizer.count"].fill_(1e9)
+        sd["distribution.std_param"].fill_(self.INIT_STD)
+        actor.load_state_dict(sd)
+        self.alg.learning_rate = self.INIT_LR
+        for g in self.alg.optimizer.param_groups:
+            g["lr"] = self.INIT_LR
+        print(f"[nudge] actor initialised from {self.INIT_REPO}/{self.INIT_FILE}@{self.INIT_REV} "
+              f"(std {self.INIT_STD}, lr {self.INIT_LR})")
+
+
+register_mjlab_task(
+    task_id="Mjlab-Nudge-Flat-MicroDuck",
+    env_cfg=make_microduck_nudge_env_cfg(),
+    play_env_cfg=make_microduck_nudge_env_cfg(play=True),
+    rl_cfg=MicroduckNudgeRlCfg,
+    runner_cls=NudgeFromVelstandRunner,
+)
+register_mjlab_task(
+    task_id="Mjlab-Nudge-Flat-Backlash-MicroDuck",
+    env_cfg=make_backlash_variant(make_microduck_nudge_env_cfg(), _BL_ALLCOLLISIONS),
+    play_env_cfg=make_backlash_variant(make_microduck_nudge_env_cfg(play=True), _BL_ALLCOLLISIONS),
+    rl_cfg=MicroduckNudgeRlCfg,
+    runner_cls=NudgeFromVelstandRunner,
+)

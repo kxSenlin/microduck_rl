@@ -7704,3 +7704,194 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# --------------------------------------------------------------------------- #
+# Precision nudge (Mjlab-Nudge-*): one small, exact move along one axis        #
+# --------------------------------------------------------------------------- #
+#
+# The runtime's one-shot skill contract (robotd SkillDef): a constant twist for
+# `duration` s, then the `unwind` twist (zeros) for `unwind_s` s, then back to
+# the walking policy. The nudge uses exactly that: twist = the requested move in
+# units (x, y: 1.0 = NUDGE_UNIT_M; yaw: 1.0 = NUDGE_UNIT_RAD) during the go
+# window, zeros after it. The zero edge is the policy's only clock: "finish the
+# step you are in and stand still". The move is measured on the STANCE frame
+# (feet midpoint, trunk heading), the frame the grasp is placed from.
+
+NUDGE_UNIT_M = 0.02
+NUDGE_UNIT_RAD = math.radians(10.0)
+
+
+class NudgeCommand(UniformVelocityCommand):
+    """Twist slots = the requested nudge for the go window, zeros after it.
+
+    Per episode: with `zero_prob` no move at all (stand still); otherwise ONE
+    axis (x, y or yaw, weights `axis_probs`), a random sign and a magnitude in
+    `magnitude_range` units. Timeline: `pre_s` of zeros (standing), the go
+    window (`go_s`), zeros. The start stance is recorded at the go onset, in
+    compute() (kinematics are fresh there: mjlab runs sim.forward() between
+    the reset and the command compute).
+    """
+
+    def __init__(self, cfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        n, dev = self.num_envs, self.device
+        self.target_units = torch.zeros(n, 3, device=dev)    # requested move, units
+        self.target = torch.zeros(n, 3, device=dev)          # forward m, left m, yaw rad (start frame)
+        self.start = torch.zeros(n, 3, device=dev)           # stance x, y, yaw at the start (world)
+        self.start_pending = torch.ones(n, dtype=torch.bool, device=dev)
+        self.prev_err = torch.zeros(n, device=dev)
+        site_ids, _ = self.robot.find_sites(("left_foot", "right_foot"), preserve_order=True)
+        self._foot_sites = site_ids
+
+    @property
+    def command(self) -> torch.Tensor:
+        return self.vel_command_b
+
+    def stance(self) -> torch.Tensor:
+        """(n, 3) feet midpoint x, y (world) and trunk heading."""
+        mid = self.robot.data.site_pos_w[:, self._foot_sites, :2].mean(dim=1)
+        q = self.robot.data.root_link_quat_w
+        yaw = torch.atan2(2 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]), 1 - 2 * (q[:, 2] ** 2 + q[:, 3] ** 2))
+        return torch.cat([mid, yaw[:, None]], dim=1)
+
+    def moved(self) -> torch.Tensor:
+        """(n, 3) displacement since the start, in the start frame: forward m, left m, yaw rad."""
+        s = self.stance()
+        d = s[:, :2] - self.start[:, :2]
+        c, si = torch.cos(self.start[:, 2]), torch.sin(self.start[:, 2])
+        fwd = c * d[:, 0] + si * d[:, 1]
+        left = -si * d[:, 0] + c * d[:, 1]
+        return torch.stack([fwd, left, wrap_to_pi(s[:, 2] - self.start[:, 2])], dim=1)
+
+    def error_norm(self) -> torch.Tensor:
+        """Remaining error in tolerance units: 1.0 = 1 cm on x/y or 5° on yaw."""
+        e = self.target - self.moved()
+        scale = torch.tensor([0.01, 0.01, math.radians(5.0)], device=self.device)
+        return torch.norm(e / scale, dim=1)
+
+    def elapsed(self) -> torch.Tensor:
+        """Seconds since the go onset (negative during the standing prelude)."""
+        return self._env.episode_length_buf.float() * self._env.step_dt - self.cfg.pre_s
+
+    def compute(self, dt: float) -> None:
+        t = self.elapsed()
+        pend = self.start_pending & (t >= -1e-6)
+        if pend.any():
+            self.start[pend] = self.stance()[pend]
+            self.start_pending[pend] = False
+            self.prev_err[pend] = self.error_norm()[pend]
+        go = ((t >= -1e-6) & (t < self.cfg.go_s - 1e-6)).float()[:, None]
+        self.vel_command_b[:] = self.target_units * go
+
+    def reset(self, env_ids: torch.Tensor | None) -> dict:
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        if len(env_ids) == 0:
+            return {}
+        n = len(env_ids)
+        units = torch.zeros(n, 3, device=self.device)
+        probs = torch.tensor(self.cfg.axis_probs, device=self.device)
+        axis = torch.multinomial(probs, n, replacement=True)
+        mag = torch.empty(n, device=self.device).uniform_(*self.cfg.magnitude_range)
+        sign = torch.where(torch.rand(n, device=self.device) < 0.5, -1.0, 1.0)
+        units[torch.arange(n, device=self.device), axis] = sign * mag
+        units[torch.rand(n, device=self.device) < self.cfg.zero_prob] = 0.0
+        self.target_units[env_ids] = units
+        self.target[env_ids] = units * torch.tensor([NUDGE_UNIT_M, NUDGE_UNIT_M, NUDGE_UNIT_RAD], device=self.device)
+        self.start_pending[env_ids] = True
+        self.vel_command_b[env_ids] = units if self.cfg.pre_s <= 0 else 0.0
+        return {}
+
+    def _resample_command(self, env_ids: torch.Tensor) -> None:
+        pass  # one target per episode, drawn in reset()
+
+    def _update_command(self) -> None:
+        pass  # compute() owns the twist
+
+    def _update_metrics(self) -> None:
+        pass
+
+
+@_dataclass(kw_only=True)
+class NudgeCommandCfg(UniformVelocityCommandCfg):
+    class_type: type = NudgeCommand
+    pre_s: float = 0.0                                 # zeros before the go window (standing prelude)
+    go_s: float = 0.5                                  # robotd skill `duration`; unwind (zeros) after it
+    axis_probs: tuple = (0.35, 0.30, 0.35)             # x, y, yaw
+    magnitude_range: tuple = (0.25, 1.5)               # units: 0.5-3 cm, 2.5-15°
+    zero_prob: float = 0.1
+
+    def build(self, env: ManagerBasedRlEnv) -> "NudgeCommand":
+        return NudgeCommand(self, env)
+
+
+def _nudge_term(env: ManagerBasedRlEnv, command_name: str) -> NudgeCommand:
+    return env.command_manager.get_term(command_name)
+
+
+def nudge_progress(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
+    """Potential-based progress toward the requested stance: previous error - current error (tolerance units).
+    Sums to |e_start| - |e_end| over an episode whatever the path: unfarmable, no jackpot. Positive weight."""
+    term = _nudge_term(env, command_name)
+    err = term.error_norm()
+    r = torch.where(term.start_pending, torch.zeros_like(err), term.prev_err - err)
+    term.prev_err = torch.where(term.start_pending, term.prev_err, err)
+    return torch.nan_to_num(r, nan=0.0)
+
+
+def nudge_hold(env: ManagerBasedRlEnv, command_name: str = "twist", std: float = 1.0, after_s: float = 0.9) -> torch.Tensor:
+    """exp(-(error/std)^2), paid only after `after_s` (the settle part of the episode): being at the requested stance
+    once the move should be over. Error in tolerance units (1 = 1 cm / 5°). Positive weight."""
+    term = _nudge_term(env, command_name)
+    on = (term.elapsed() >= after_s) & ~term.start_pending
+    return torch.exp(-(term.error_norm() / std) ** 2) * on.float()
+
+
+def nudge_critic_obs(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
+    """Privileged critic input: remaining error (forward, left in cm; yaw in 5° units, zero before the go onset) and
+    the time since the go onset (s)."""
+    term = _nudge_term(env, command_name)
+    e = term.target - term.moved()
+    e = e / torch.tensor([0.01, 0.01, math.radians(5.0)], device=env.device)
+    e = torch.where(term.start_pending[:, None], term.target_units * 2.0, e)
+    return torch.nan_to_num(torch.cat([e, term.elapsed()[:, None]], dim=1), nan=0.0)
+
+
+def nudge_still(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    after_s: float = 1.2,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Motion at the end of the episode: trunk linear speed (m/s, x10) squared + yaw/roll/pitch rate squared + mean
+    servo speed squared, after `after_s`. The walking policy takes over from here: it must find the duck still.
+    Positive quantity, negative weight."""
+    term = _nudge_term(env, command_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    on = (term.elapsed() >= after_s).float()
+    lin = (10.0 * asset.data.root_link_lin_vel_w[:, :2]).pow(2).sum(dim=1)
+    ang = asset.data.root_link_ang_vel_w.pow(2).sum(dim=1)
+    jv = asset.data.joint_vel[:, _servo_joint_ids(env, asset)].pow(2).mean(dim=1)
+    return torch.nan_to_num((lin + ang + jv) * on, nan=0.0)
+
+
+def nudge_feet_down(env: ManagerBasedRlEnv, sensor_name: str, command_name: str = "twist", after_s: float = 1.2) -> torch.Tensor:
+    """1 while both feet touch the floor after `after_s`, else 0: end on two feet. Positive weight."""
+    term = _nudge_term(env, command_name)
+    found = env.scene[sensor_name].data.found
+    both = (found > 0).all(dim=1).float()
+    return both * (term.elapsed() >= after_s).float()
+
+
+def nudge_metrics(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
+    """Weight-0 logger: final stance error per axis at the end of the episode (mm, mm, deg) in extras."""
+    term = _nudge_term(env, command_name)
+    last = env.episode_length_buf >= env.max_episode_length - 1
+    if last.any():
+        e = (term.target - term.moved())[last]
+        env.extras.setdefault("log", {})
+        env.extras["log"]["Metrics/nudge_final_err_x_mm"] = 1000 * e[:, 0].abs().mean()
+        env.extras["log"]["Metrics/nudge_final_err_y_mm"] = 1000 * e[:, 1].abs().mean()
+        env.extras["log"]["Metrics/nudge_final_err_yaw_deg"] = torch.rad2deg(e[:, 2].abs()).mean()
+    return torch.zeros(env.num_envs, device=env.device)
