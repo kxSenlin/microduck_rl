@@ -27,8 +27,12 @@ cfg = load_env_cfg(a.task)
 cfg.scene.num_envs = a.envs
 cfg.seed = a.seed
 env = ManagerBasedRlEnv(cfg, device="cpu")
+env.common_step_counter = 10 ** 9            # every curriculum at its final stage (runtime layer fully on)
 pi = Policy(a.onnx)
 obs, _ = env.reset()
+if "runtime_layer" in env.curriculum_manager.active_terms:
+    env.curriculum_manager.compute(env_ids=torch.arange(env.num_envs))
+    obs, _ = env.reset()
 term = env.command_manager.get_term("twist")
 T = int(round(cfg.episode_length_s / env.step_dt))
 target = None
