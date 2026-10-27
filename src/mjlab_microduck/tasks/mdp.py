@@ -7879,6 +7879,24 @@ def nudge_lift(env: ManagerBasedRlEnv, sensor_name: str, command_name: str = "tw
     return single * asked * ((t >= 0) & (t < until_s)).float()
 
 
+def nudge_end_pose(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    after_s: float = 1.1,
+    std: float = 0.1,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """exp(-mean over the 14 servos of ((q - HOME) / std)^2) after `after_s`: end in the standing pose the walking
+    policy takes over from. Run 2 ended 2 cm crouched with the neck at -1.7 rad, and velstand then stepped back to its
+    stance and wandered 1-3 cm and 10-28 deg. Positive weight."""
+    term = _nudge_term(env, command_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = _servo_joint_ids(env, asset)
+    dq = asset.data.joint_pos[:, ids] - asset.data.default_joint_pos[:, ids]
+    on = (term.elapsed() >= after_s).float()
+    return torch.nan_to_num(torch.exp(-(dq / std).pow(2).mean(dim=1)) * on, nan=0.0)
+
+
 def nudge_critic_obs(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
     """Privileged critic input: remaining error (forward, left in cm; yaw in 5° units, zero before the go onset) and
     the time since the go onset (s)."""

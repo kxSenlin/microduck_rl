@@ -16,7 +16,10 @@ nudge_fwd = [0.3, 0, 0], duration 0.5, unwind_s 1.3.
 
 Run 1 (nudge-r1-1027, 2026-10-27) learned to stand still: the task terms were ~10 % of the reward mass (action rate
 alone twice them) and the requests sat in velstand's dead zone. Run 2: task terms x10, an L1 miss term, a stepping
-prior during the move, action rate eased in (-0.2 -> -1.0), larger command units.
+prior during the move, action rate eased in (-0.2 -> -1.0), larger command units. It stepped and landed within a few
+mm in its own env @500, but ended 2 cm crouched (neck -1.7 rad), and velstand then wandered 1-3 cm and 10-28 deg after
+the hand-back; and robotd's action layer scattered it. Run 3 (Mjlab-NudgeRuntime): an end-at-HOME term and robotd's
+action layer eased in from iteration 400.
 
 Episode: PRE_S of zero command (the duck stands as the walking policy left it), the go window, then SETTLE_S of zeros.
 The move is measured on the stance frame (feet midpoint, trunk heading) from the go onset.
@@ -58,6 +61,7 @@ HOLD_FINE_WEIGHT, HOLD_FINE_STD = 15.0, 0.3  # sharp: 3 mm / 1.5°
 MISS_WEIGHT = -2.0                    # L1 pull in the hold window, flat where the Gaussians are
 LIFT_WEIGHT, LIFT_UNTIL_S = 1.0, 0.9  # stepping prior during the move (single support), move episodes only
 POSE_WEIGHT = 0.5                     # velocity recipe 1.0: its tight standing std fights the finishing step
+END_POSE_AFTER_S, END_POSE_STD, END_POSE_WEIGHT = 1.1, 0.1, 15.0   # end at HOME: the walking policy takes over there
 ACTION_RATE_STAGES = ((0, -0.2), (1500, -0.5), (2500, -1.0))   # (iteration, weight): smoothness after discovery
 STILL_AFTER_S = 1.2
 STILL_WEIGHT = -0.5
@@ -66,15 +70,15 @@ SLIP_WEIGHT = -5.0                    # planted feet must not slide (always on, 
 TERMINATION_WEIGHT = -10.0
 STAND_Z = (0.116, 0.119)              # spawn just above the measured standing trunk height (0.1158)
 
-# Runtime layer (run 3, resumed from run 2): robotd's walk-mode action path, eased in. In sim, run 2's policy @250
-# landed a 1.5 cm request at 10.4 +- 3.3 mm with the training's plain action, and scattered up to +-8 cm sideways with
-# robotd's 0.9 scale + leg/head low-pass (scripts/precision/pm_skill_eval.py). Stages in iterations.
+# Runtime layer (run 3): robotd's walk-mode action path, eased in after the stepping is discovered (run 2 found it
+# within 250 iterations). In sim, run 2's policy @250 landed a 1.5 cm request at 10.4 +- 3.3 mm with the plain action
+# and scattered up to +-8 cm sideways through robotd's 0.9 scale + leg/head low-pass (pm_skill_eval.py).
 RUNTIME_LAYER_STAGES = (
     (0, 1.0, 1.0, 1.0, 1.0),          # (iteration, leg alpha, head alpha, scale lo, scale hi): the plain action
-    (150, 0.85, 0.75, 0.9, 1.0),
-    (300, 0.7, 0.5, 0.8, 1.0),        # robotd: legs_lowpass 0.7, head_lowpass 0.5, 0.9 x battery adaptation
+    (400, 0.85, 0.75, 0.9, 1.0),
+    (700, 0.7, 0.5, 0.8, 1.0),        # robotd: legs_lowpass 0.7, head_lowpass 0.5, 0.9 x battery adaptation
 )
-RUNTIME_ACTION_RATE_STAGES = ((0, -0.5), (800, -1.0))   # run 3 resumes from run 2 @~1500 (action rate -0.2 -> -0.5 there)
+RUNTIME_ACTION_RATE_STAGES = ((0, -0.2), (1200, -0.5), (2000, -1.0))
 
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
                 "foot_swing_height", "foot_slip", "head_pose_bias", "body_pose_tracking")
@@ -166,6 +170,9 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         func=microduck_mdp.nudge_lift, weight=LIFT_WEIGHT,
         params={"sensor_name": "feet_ground_contact", "command_name": "twist", "until_s": LIFT_UNTIL_S})
     cfg.rewards["pose"].weight = POSE_WEIGHT
+    cfg.rewards["nudge_end_pose"] = RewardTermCfg(
+        func=microduck_mdp.nudge_end_pose, weight=END_POSE_WEIGHT,
+        params={"command_name": "twist", "after_s": END_POSE_AFTER_S, "std": END_POSE_STD})
     cfg.rewards["termination"] = RewardTermCfg(func=envs_mdp.is_terminated, weight=TERMINATION_WEIGHT)
     cfg.rewards["nudge_metrics"] = RewardTermCfg(
         func=microduck_mdp.nudge_metrics, weight=0.0, params={"command_name": "twist"})

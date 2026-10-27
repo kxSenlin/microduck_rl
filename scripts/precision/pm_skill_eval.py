@@ -38,6 +38,8 @@ def main():
     ap.add_argument("--envs", type=int, default=16)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--no-lowpass", action="store_true", help="no robotd leg/head low-pass (training has none)")
+    ap.add_argument("--before-nudge", action="store_true", help="the nudge policy (zero command) stands before, not velstand")
+    ap.add_argument("--handback-lastact", action="store_true", help="probe: at the handback, velstand sees its own standing action as last action")
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--record", type=int, default=0)
     ap.add_argument("--npz", default=None)
@@ -48,15 +50,18 @@ def main():
     walk_scale = sim.action_scale
     cmd = [0.0, 0.0, 0.0]
     cmd[AX[a.axis]] = a.units
+    acts = []
     for _ in range(100):
         sim.step([0.0, 0.0, 0.0])
+        acts.append(sim.obs[:, 34:48].clone())
+    stand_act = torch.stack(acts[50:]).mean(dim=0)
     rows, frames, marks = [], [], []
     rec = list(range(min(a.record, a.envs)))
     t0 = time.time()
     s_first = sim.stance()
     for r in range(a.reps):
         for _ in range(int(a.before / sim.dt)):
-            sim.step([0.0, 0.0, 0.0])
+            sim.step([0.0, 0.0, 0.0], policy=nudge if a.before_nudge else None, smooth=not a.before_nudge)
             if rec: frames.append(sim.qpos(rec))
         s0 = sim.stance()
         marks.append(len(frames))
@@ -66,6 +71,9 @@ def main():
             if rec: frames.append(sim.qpos(rec))
         sim.action_scale = walk_scale
         s_skill = sim.stance()
+        if a.handback_lastact:
+            sim.obs[:, 34:48] = stand_act
+        dk = rel(s_skill, s0)
         for _ in range(int(a.after / sim.dt)):
             sim.step([0.0, 0.0, 0.0])
             if rec: frames.append(sim.qpos(rec))
@@ -73,17 +81,24 @@ def main():
         dh = rel(sim.stance(), s_skill)
         rows.append({"fwd_mm": (d[:, 0] * 1000).tolist(), "left_mm": (d[:, 1] * 1000).tolist(),
                      "yaw_deg": (d[:, 2] * 180 / math.pi).tolist(),
+                     "skill_fwd_mm": (dk[:, 0] * 1000).tolist(), "skill_left_mm": (dk[:, 1] * 1000).tolist(),
+                     "skill_yaw_deg": (dk[:, 2] * 180 / math.pi).tolist(),
                      "handback_mm": (torch.norm(dh[:, :2], dim=1) * 1000).tolist(),
                      "handback_deg": (dh[:, 2].abs() * 180 / math.pi).tolist(), "upright": sim.upright().tolist()})
     f = np.array(sum((r["fwd_mm"] for r in rows), []))
     l = np.array(sum((r["left_mm"] for r in rows), []))
     y = np.array(sum((r["yaw_deg"] for r in rows), []))
     hb = np.array(sum((r["handback_mm"] for r in rows), []))
+    kf = np.array(sum((r["skill_fwd_mm"] for r in rows), []))
+    kl = np.array(sum((r["skill_left_mm"] for r in rows), []))
+    ky = np.array(sum((r["skill_yaw_deg"] for r in rows), []))
     up = sum(sum(r["upright"]) for r in rows)
     tgt = a.units * UNIT[a.axis]
     print(f"nudge {a.axis} {a.units:+.2f} units (target {tgt:+.1f} {'deg' if a.axis == 'w' else 'mm'}): n={len(f)}  "
           f"fwd {f.mean():+.1f}±{f.std():.1f} mm  left {l.mean():+.1f}±{l.std():.1f} mm  yaw {y.mean():+.1f}±{y.std():.1f}°  "
-          f"handback drift {hb.mean():.1f} mm  upright {up}/{len(f)}  [{time.time() - t0:.0f}s]", flush=True)
+          f"handback drift {hb.mean():.1f} mm  upright {up}/{len(f)}  [{time.time() - t0:.0f}s]\n"
+          f"   at the skill's end: fwd {kf.mean():+.1f}±{kf.std():.1f} mm  left {kl.mean():+.1f}±{kl.std():.1f} mm  "
+          f"yaw {ky.mean():+.1f}±{ky.std():.1f}°", flush=True)
     out = {"args": vars(a), "rows": rows, "target": tgt}
     Path(a.out).write_text(json.dumps(out, default=float))
     if rec and a.npz:
