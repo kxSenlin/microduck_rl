@@ -102,6 +102,8 @@ SAFE_OVERRUN_WEIGHT = -10.0           # per rad of commanded target past a joint
 # prices). The safe variant clips the raw action (training = the exported ONNX's clip): range + 0.05 rad, hip roll
 # + 0.35 (its model range is narrower than the real joint; shipped velstand goes 0.43 past it).
 SAFE_CLAMP_MARGIN = 0.05
+# Run 6: the end-pose term fell 2.7 -> 1.7 once the action rate reached -1.0 (iteration 2000); keep -0.5.
+SAFE_ACTION_RATE_STAGES = ((0, -0.2), (1200, -0.5))
 RUNTIME_ENTROPY_COEF = 0.005
 
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
@@ -218,6 +220,9 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         cfg.rewards["nudge_target_overrun"] = RewardTermCfg(func=microduck_mdp.nudge_target_overrun, weight=SAFE_OVERRUN_WEIGHT)
         if isinstance(cfg.actions["joint_pos"], microduck_mdp.RuntimeLayerJointPositionActionCfg):
             cfg.actions["joint_pos"].clamp_margin = SAFE_CLAMP_MARGIN
+        if "action_rate_weight" in cfg.curriculum:
+            cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
+                {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in SAFE_ACTION_RATE_STAGES]
     return cfg
 
 
