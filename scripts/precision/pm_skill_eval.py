@@ -40,6 +40,7 @@ def main():
     ap.add_argument("--no-lowpass", action="store_true", help="no robotd leg/head low-pass (training has none)")
     ap.add_argument("--before-nudge", action="store_true", help="the nudge policy (zero command) stands before, not velstand")
     ap.add_argument("--handback-lastact", action="store_true", help="probe: at the handback, velstand sees its own standing action as last action")
+    ap.add_argument("--clamp", type=float, default=None, help="clip the nudge output so HOME + action stays within the joint range + this margin (rad; hip roll +0.3)")
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--record", type=int, default=0)
     ap.add_argument("--npz", default=None)
@@ -47,6 +48,14 @@ def main():
     a = ap.parse_args()
     sim = Sim(n=a.envs, seed=a.seed, lowpass=(1.0, 1.0) if a.no_lowpass else None)
     nudge = Policy(a.onnx)
+    if a.clamp is not None:
+        t = sim.env.action_manager.get_term("joint_pos")
+        lim = sim.robot.data.joint_pos_limits[0, t._target_ids].clone()
+        home = sim.robot.data.default_joint_pos[0, t._target_ids].clone()
+        m = torch.tensor([a.clamp + (0.3 if "hip_roll" in n else 0.0) for n in t._target_names])
+        lo, hi = lim[:, 0] - m - home, lim[:, 1] + m - home
+        raw = nudge
+        nudge = lambda obs: torch.clamp(raw(obs), lo, hi)
     walk_scale = sim.action_scale
     cmd = [0.0, 0.0, 0.0]
     cmd[AX[a.axis]] = a.units

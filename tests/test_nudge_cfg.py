@@ -126,6 +126,7 @@ def test_safe_variant_makes_falls_expensive():
     assert cfg.rewards["termination"].weight <= -100.0
     assert cfg.terminations["fell_over"].params["limit_angle"] <= math.radians(45.0)
     assert cfg.rewards["nudge_target_overrun"].weight < 0.0
+    assert cfg.actions["joint_pos"].clamp_margin == nudge.SAFE_CLAMP_MARGIN
 
 
 def test_safe_fine_tune_has_no_entropy_bonus():

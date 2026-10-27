@@ -7982,6 +7982,10 @@ class RuntimeLayerJointPositionAction(_JointAction):
         self._scale_env = torch.ones((self.num_envs, 1), device=self.device)
         self._filtered = self._entity.data.default_joint_pos[:, self._target_ids].clone()
         self.set_layer(cfg.leg_alpha, cfg.head_alpha, cfg.scale_lo, cfg.scale_hi)
+        self._clamp = None
+        if cfg.clamp_margin is not None:
+            self._clamp = action_clamp_bounds(self._entity, self._target_ids, self._target_names, cfg.clamp_margin,
+                                              cfg.clamp_hip_roll_extra)
 
     def set_layer(self, leg_alpha: float, head_alpha: float, scale_lo: float, scale_hi: float) -> None:
         self._alpha = torch.where(self._is_head, torch.tensor(float(head_alpha), device=self.device),
@@ -7989,6 +7993,10 @@ class RuntimeLayerJointPositionAction(_JointAction):
         self._scale_range = (float(scale_lo), float(scale_hi))
 
     def process_actions(self, actions: torch.Tensor) -> None:
+        if self._clamp is not None:
+            # the trained policy's output, clipped the way its exported ONNX clips it (bake_action_clamp)
+            actions = torch.maximum(torch.minimum(actions, self._clamp[1]), self._clamp[0])
+            self._env.action_manager._action[:] = actions
         if self._handover is not None:
             # robotd's sequence around a skill: the walking policy drives before and after it. Its output replaces
             # the trained policy's there (and is what the next observation reports as the last action).
@@ -8029,9 +8037,22 @@ class RuntimeLayerJointPositionActionCfg(_JointActionCfg):
     # NudgeCommand `command_name` (robotd's walking policy before and after a one-shot skill); None = never
     handover_policy: tuple | None = None
     command_name: str = "twist"
+    # clip the trained policy's raw output so HOME + action stays within each joint's range + this margin (rad);
+    # hip roll gets `clamp_hip_roll_extra` more (its model range is narrower than the real joint). None = no clip.
+    clamp_margin: float | None = None
+    clamp_hip_roll_extra: float = 0.3
 
     def build(self, env: ManagerBasedRlEnv) -> RuntimeLayerJointPositionAction:
         return RuntimeLayerJointPositionAction(self, env)
+
+
+def action_clamp_bounds(entity, target_ids, target_names, margin: float, hip_roll_extra: float = 0.3):
+    """(lo, hi) on the raw action such that HOME + action stays within the joint range + margin (scale <= 1, robotd's
+    0.9 x battery adaptation). Shared by training (RuntimeLayerJointPositionAction) and the ONNX export clip."""
+    lim = entity.data.joint_pos_limits[0, target_ids]
+    home = entity.data.default_joint_pos[0, target_ids]
+    m = torch.tensor([margin + (hip_roll_extra if "hip_roll" in n else 0.0) for n in target_names], device=lim.device)
+    return (lim[:, 0] - m - home)[None, :], (lim[:, 1] + m - home)[None, :]
 
 
 def runtime_layer_curriculum(env: ManagerBasedRlEnv, env_ids: torch.Tensor, stages: list[dict]) -> torch.Tensor:
