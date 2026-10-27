@@ -462,6 +462,16 @@ TEACHER_MASK_COLS = tuple(range(6, 48))
 #   rows lying on a side AND still keep their joint obs (distill bc_cfg).
 ENABLE_SIDE_UNMASKED_TEACHER = True
 TEACHER_MASK_KEEP_SIDE_CONE_DEG = 45.0   # v8 stuck states sit 36-41° off the side axis (oblique side-back)
+# "Still" = trunk gyro only (2026-10-27, run 08i5tsoj eval). The side freeze exists only for the
+# DETERMINISTIC policy: with PPO's exploration noise (std 0.35) the student gets up from 100 % of
+# recorded stuck poses, vs 22 % noise-free. So in rollouts the robot is never "still" by the old
+# gate (gyro < 0.3 AND mean |qvel| < 0.4): only 2.3 % of noisy side frames passed it, the rest got
+# the MASKED label = the freeze pose, and BC kept teaching the freeze. Action noise shakes the
+# joints, not a trunk lying on its side: gyro < 1.0 alone passes 42 % of those frames, still far
+# below roll-through speeds (6-8 rad/s). Teacher closed loop with this gate: same rise rate and
+# |ω| as the old gate on every family (rise battery, backlash).
+TEACHER_STILL_GYRO = 1.0
+TEACHER_STILL_QVEL = float("inf")   # joint speed ignored
 ENABLE_FOOT_CLEARANCE = True
 FOOT_CLEARANCE_MIN = 0.015            # PPO cost on the measured feet: box proxy (≈ mesh 18-20 mm); walking p1 ≥ 21 mm unpushed
 FOOT_CLEARANCE_LABEL_MIN = 0.020      # teacher-label path projection (emulated: 15 mm → swing p50 +6, 25 mm → +9, rise kept)
@@ -1036,7 +1046,9 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
             **({"unanchor_turn_in_place": True} if ENABLE_YAW_FIX else {}),
             **({"anchor_yaw_remap": ANCHOR_YAW_REMAP} if ENABLE_ANCHOR_YAW_REMAP else {}),
             **({"expert_mask_cols": TEACHER_MASK_COLS, "expert_mask_tilt_deg": TEACHER_MASK_TILT_DEG} if ENABLE_JOINT_MASKED_TEACHER else {}),
-            **({"expert_mask_keep_side_cone_deg": TEACHER_MASK_KEEP_SIDE_CONE_DEG} if ENABLE_SIDE_UNMASKED_TEACHER else {}),
+            **({"expert_mask_keep_side_cone_deg": TEACHER_MASK_KEEP_SIDE_CONE_DEG,
+                "expert_mask_still_gyro": TEACHER_STILL_GYRO,
+                "expert_mask_still_qvel": TEACHER_STILL_QVEL} if ENABLE_SIDE_UNMASKED_TEACHER else {}),
             **({"label_min_foot_clearance": FOOT_CLEARANCE_LABEL_MIN, "label_clearance_joints": FOOT_CLEARANCE_LABEL_JOINTS,
                 "home_joint_pos": home_servo_pos()} if ENABLE_FOOT_CLEARANCE else {}),
         } if ENABLE_EXPERT_BC else None,

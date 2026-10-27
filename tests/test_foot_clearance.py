@@ -144,3 +144,13 @@ def test_velstand_stuck_spawns_wired():
     np.testing.assert_allclose(np.linalg.norm(d["quat"], axis=1), 1.0, atol=1e-4)
     p = vs.make_microduck_velstand_env_cfg().events["random_prone_init"].params
     assert p["stuck_prob"] == vs.STUCK_SPAWN_PROB and p["stuck_params"]["library_path"] == vs.STUCK_LIBRARY
+
+
+def test_still_gate_ignores_joint_jitter():
+    """PPO action noise shakes the joints of a robot lying on its side; the still gate must keep it."""
+    bc = vs.MicroduckVelStandRlCfg.algorithm.bc_cfg
+    obs = torch.zeros(2, 61)
+    obs[:, 3:6] = torch.tensor([0.0, 1.0, 0.0])
+    obs[0, 20:34] = 2.0                           # joints jittering under exploration noise
+    obs[1, 0:3] = torch.tensor([3.0, 0.0, 0.0])   # rolling through the side
+    assert distill.still_mask_from_obs(obs, bc["expert_mask_still_gyro"], bc["expert_mask_still_qvel"]).tolist() == [True, False]
