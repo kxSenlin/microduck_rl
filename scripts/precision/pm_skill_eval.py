@@ -5,7 +5,7 @@ Each trial: the walking policy (velstand v8) stands at zero command, the nudge s
 `--after` s. The stance displacement from the skill start to the end is the nudge. Optionally records the qpos of the
 first `--record` envs (npz) for a replay render.
 
-  PYTHONPATH=src .venv-mjlab/bin/python scripts/precision/pm_skill_eval.py NUDGE.onnx --axis x --units 0.75 \
+  PYTHONPATH=src .venv-mjlab/bin/python scripts/precision/pm_skill_eval.py NUDGE.onnx --axis x --units 0.15 \
       --envs 16 --reps 3 --out OUT.json [--record 4 --npz OUT.npz] [--scale 1.0]
 """
 import argparse
@@ -22,14 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pm_env import Policy, Sim, rel  # noqa: E402
 
 AX = {"x": 0, "y": 1, "w": 2}
-UNIT = {"x": 20.0, "y": 20.0, "w": 10.0}       # mm, mm, degrees per command unit
+UNIT = {"x": 100.0, "y": 100.0, "w": 28.6479}  # mm, mm, degrees per command unit (NUDGE_UNIT_M 0.1, NUDGE_UNIT_RAD 0.5)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("onnx")
     ap.add_argument("--axis", choices=list(AX), required=True)
-    ap.add_argument("--units", type=float, required=True, help="signed command units (x, y: 1 = 2 cm; w: 1 = 10°)")
+    ap.add_argument("--units", type=float, required=True, help="signed command (x, y: metres / 0.1, so 0.15 = 1.5 cm; w: radians / 0.5, so 0.262 = 7.5°)")
     ap.add_argument("--go", type=float, default=0.5)
     ap.add_argument("--unwind", type=float, default=1.3)
     ap.add_argument("--before", type=float, default=1.0)
@@ -37,7 +37,6 @@ def main():
     ap.add_argument("--scale", type=float, default=None, help="action scale while the skill runs (robot default 0.9)")
     ap.add_argument("--envs", type=int, default=16)
     ap.add_argument("--reps", type=int, default=3)
-    ap.add_argument("--chain", action="store_true", help="reps follow each other without re-centring (repeated nudges)")
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--record", type=int, default=0)
     ap.add_argument("--npz", default=None)
