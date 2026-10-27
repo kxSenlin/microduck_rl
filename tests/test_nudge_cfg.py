@@ -113,3 +113,9 @@ def test_runtime_variant_puts_the_walking_policy_around_the_skill():
     # the hold terms keep scoring after the hand-back; the end pose and stillness stop at the skill's end
     assert "until_s" not in cfg.rewards["nudge_hold"].params
     assert math.isclose(cfg.rewards["nudge_end_pose"].params["until_s"], nudge.GO_S + nudge.SETTLE_S)
+
+
+def test_discarded_outputs_are_priced_and_entropy_is_halved():
+    cfg = make_microduck_nudge_env_cfg(runtime_layer=True)
+    assert cfg.rewards["handover_imitation"].weight < 0.0
+    assert nudge.MicroduckNudgeRuntimeRlCfg.algorithm.entropy_coef < nudge.MicroduckNudgeRlCfg.algorithm.entropy_coef

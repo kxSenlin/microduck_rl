@@ -289,6 +289,7 @@ from pathlib import Path as _NudgePath  # noqa: E402
 from .microduck_nudge_env_cfg import (  # noqa: E402
     make_microduck_nudge_env_cfg,
     MicroduckNudgeRlCfg,
+    MicroduckNudgeRuntimeRlCfg,
 )
 
 
@@ -346,7 +347,7 @@ register_mjlab_task(
     task_id="Mjlab-NudgeRuntime-Flat-Backlash-MicroDuck",
     env_cfg=make_backlash_variant(make_microduck_nudge_env_cfg(runtime_layer=True), _BL_ALLCOLLISIONS),
     play_env_cfg=make_backlash_variant(make_microduck_nudge_env_cfg(play=True, runtime_layer=True), _BL_ALLCOLLISIONS),
-    rl_cfg=MicroduckNudgeRlCfg,
+    rl_cfg=MicroduckNudgeRuntimeRlCfg,
     runner_cls=NudgeFromVelstandRunner,
 )
 register_mjlab_task(

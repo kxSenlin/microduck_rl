@@ -7971,6 +7971,10 @@ class RuntimeLayerJointPositionAction(_JointAction):
     def __init__(self, cfg: "RuntimeLayerJointPositionActionCfg", env: ManagerBasedRlEnv):
         super().__init__(cfg, env)
         self._handover = OnnxMlp.from_hub(*cfg.handover_policy, device=self.device) if cfg.handover_policy else None
+        # the policy's own output and the walking policy's, kept for handover_imitation (zeros = no hand-over this tick)
+        self.policy_actions = torch.zeros((self.num_envs, self._num_targets), device=self.device)
+        self.handover_actions = torch.zeros((self.num_envs, self._num_targets), device=self.device)
+        self.outside = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._is_head = torch.zeros((1, self._num_targets), dtype=torch.bool, device=self.device)
         for i, name in enumerate(self._target_names):
             if ("neck" in name) or ("head" in name):
@@ -7989,9 +7993,12 @@ class RuntimeLayerJointPositionAction(_JointAction):
             # robotd's sequence around a skill: the walking policy drives before and after it. Its output replaces
             # the trained policy's there (and is what the next observation reports as the last action).
             outside = self._env.command_manager.get_term(self.cfg.command_name).outside_skill()
+            self.outside = outside
+            self.policy_actions = actions.clone()
             if outside.any():
                 with torch.no_grad():
                     walk = self._handover(self._env.obs_buf["actor"])
+                self.handover_actions = walk
                 actions = torch.where(outside[:, None], walk, actions)
                 # robotd observes the output it applied: the next observation's last action is the walking policy's
                 # (this term is the env's only action term, so it owns the whole action vector)
@@ -8038,6 +8045,18 @@ def runtime_layer_curriculum(env: ManagerBasedRlEnv, env_ids: torch.Tensor, stag
     term = env.action_manager.get_term("joint_pos")
     term.set_layer(cur["leg_alpha"], cur["head_alpha"], cur["scale_lo"], cur["scale_hi"])
     return torch.tensor([float(cur["leg_alpha"])])
+
+
+def handover_imitation(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -> torch.Tensor:
+    """Outside the skill window the trained policy's output is discarded (the walking policy drives): its exploration
+    noise there cost nothing, and the entropy bonus inflated the shared action std 0.25 -> 0.8 rad in run 4, which
+    then wrecked the skill itself. Mean squared gap to the walking policy's output on those ticks gives the noise a
+    price (and the zero-command behaviour a target). Positive quantity, negative weight."""
+    term = env.action_manager.get_term(action_name)
+    if getattr(term, "_handover", None) is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    gap = (term.policy_actions - term.handover_actions).pow(2).mean(dim=1)
+    return torch.nan_to_num(gap * term.outside.float(), nan=0.0)
 
 
 class OnnxMlp(torch.nn.Module):

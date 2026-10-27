@@ -88,6 +88,11 @@ RUNTIME_ACTION_RATE_STAGES = ((0, -0.2), (1200, -0.5), (2000, -1.0))
 HANDOVER_POLICY = ("pollen-robotics/microduck-policies", "velstand.onnx", "v8")
 HANDOVER_PRE_S = 0.8
 HANDOVER_POST_S = 0.5
+# Run 4 (velstand in the loop) lost its end pose and turned jerky from iteration ~150: the action std grew 0.25 ->
+# 0.8 rad because the discarded outputs outside the skill cost nothing under the entropy bonus. Price them, and halve
+# the bonus.
+HANDOVER_IMITATION_WEIGHT = -5.0
+RUNTIME_ENTROPY_COEF = 0.005
 
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
                 "foot_swing_height", "foot_slip", "head_pose_bias", "body_pose_tracking")
@@ -121,6 +126,8 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         cfg.actions["joint_pos"] = microduck_mdp.RuntimeLayerJointPositionActionCfg(
             **{k: v for k, v in vars(old_act).items() if k in keep}, leg_alpha=leg, head_alpha=head, scale_lo=lo, scale_hi=hi,
             handover_policy=HANDOVER_POLICY, command_name="twist")
+        cfg.rewards["handover_imitation"] = RewardTermCfg(
+            func=microduck_mdp.handover_imitation, weight=HANDOVER_IMITATION_WEIGHT)
         if not play:
             cfg.curriculum["runtime_layer"] = CurriculumTermCfg(
                 func=microduck_mdp.runtime_layer_curriculum,
@@ -200,3 +207,6 @@ MicroduckNudgeRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckNudgeRlCfg.experiment_name = "nudge"
 MicroduckNudgeRlCfg.run_name = "nudge"
 MicroduckNudgeRlCfg.max_iterations = 3000
+
+MicroduckNudgeRuntimeRlCfg = deepcopy(MicroduckNudgeRlCfg)
+MicroduckNudgeRuntimeRlCfg.algorithm.entropy_coef = RUNTIME_ENTROPY_COEF
