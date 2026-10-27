@@ -232,6 +232,7 @@ from mjlab.rl import (
 
 from mjlab.envs.mdp import push_by_setting_velocity
 from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab_microduck.tasks.foot_clearance import home_servo_pos
 
 from mjlab_microduck.robot.microduck_constants import (
     MICRODUCK_ALLCOLLISIONS_ROBOT_CFG,
@@ -441,6 +442,30 @@ ENABLE_JOINT_MASKED_TEACHER = True
 TEACHER_MASK_TILT_DEG = 75.0
 # Flat 61D actor obs: ang_vel 0:3, gravity 3:6, joint_pos 6:20, joint_vel 20:34, last action 34:48.
 TEACHER_MASK_COLS = tuple(range(6, 48))
+# 2026-10-27 (branch standup_foot_catch) — v8 on the robot: (1) the swing from the
+# back sometimes catches the swinging foot on the other foot and the roll stalls,
+# retried until it passes; (2) rare freeze lying on a SIDE with the legs folded.
+#   (1) never happens in sim: the swing clears the other foot by p50 4-9 mm (mesh,
+#   CPU replay of rise-battery trajectories; rj_fu 56 % < 5 mm). The ±1° backlash
+#   alone moves the feet ~6 mm, so on hardware it touches. The tight swing is the
+#   stand teacher's (alpha_stand p50 2-6 mm), copied through BC → project the
+#   teacher's labels to a minimum foot clearance (FOOT_CLEARANCE_*: box proxy from
+#   leg FK, tasks/foot_clearance.py) + a fallen-gated clearance cost so PPO agrees.
+#   The teacher's swing throws one leg ACROSS the body; its targets press the feet
+#   into each other (−15 mm box) and only contact stops them — so the projection
+#   is on the joint-space PATH current → target (target-only projection: no effect).
+#   (2) is a fixed point of the JOINT-MASKED teacher: on a side its masked label is
+#   a constant pose; handed control it rescues 0 of v8's stuck side states, the
+#   unmasked teacher rescues ~all. Unmasking every side row made the teacher's own
+#   rises violent (face-up |ω| 6.8 → 10: the roll passes through the side), so only
+#   rows lying on a side AND still keep their joint obs (distill bc_cfg).
+ENABLE_SIDE_UNMASKED_TEACHER = True
+TEACHER_MASK_KEEP_SIDE_CONE_DEG = 45.0   # v8 stuck states sit 36-41° off the side axis (oblique side-back)
+ENABLE_FOOT_CLEARANCE = True
+FOOT_CLEARANCE_MIN = 0.015            # PPO cost on the measured feet: box proxy (≈ mesh 18-20 mm); walking p1 ≥ 21 mm unpushed
+FOOT_CLEARANCE_LABEL_MIN = 0.020      # teacher-label path projection (emulated: 15 mm → swing p50 +6, 25 mm → +9, rise kept)
+FOOT_CLEARANCE_LABEL_JOINTS = (0, 1, 2, 3, 4, 9, 10, 11, 12, 13)   # all leg joints (servo order)
+FOOT_CLEARANCE_COST_WEIGHT = -0.5     # per step at full deficit (fallen_tax is -0.5)
 ENABLE_WIDE_SPAWNS = True
 WIDE_JOINT_RANDOM_PROB = 0.5    # share of the prone slice with random servo joints
 WIDE_JOINT_RANGE_FRAC = 0.9
@@ -766,6 +791,12 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
         weight=SERVO_STALL_WEIGHT * PROTECT_STAGE0_FRAC,
         params={"torque_thresh": SERVO_STALL_TORQUE, "vel_thresh": SERVO_STALL_VEL},
     )
+    if ENABLE_FOOT_CLEARANCE:
+        cfg.rewards["foot_clearance"] = RewardTermCfg(
+            func=microduck_mdp.foot_clearance_cost,
+            weight=FOOT_CLEARANCE_COST_WEIGHT,
+            params={"min_clearance": FOOT_CLEARANCE_MIN, "gate_tilt_above_deg": REWARD_GATE_TILT_DEG},
+        )
     # ⚠️ POSITIVE weight: trunk_vertical_accel_penalty returns -|a_z| already.
     cfg.rewards["gentle_rise"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty,
@@ -994,6 +1025,9 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
             **({"unanchor_turn_in_place": True} if ENABLE_YAW_FIX else {}),
             **({"anchor_yaw_remap": ANCHOR_YAW_REMAP} if ENABLE_ANCHOR_YAW_REMAP else {}),
             **({"expert_mask_cols": TEACHER_MASK_COLS, "expert_mask_tilt_deg": TEACHER_MASK_TILT_DEG} if ENABLE_JOINT_MASKED_TEACHER else {}),
+            **({"expert_mask_keep_side_cone_deg": TEACHER_MASK_KEEP_SIDE_CONE_DEG} if ENABLE_SIDE_UNMASKED_TEACHER else {}),
+            **({"label_min_foot_clearance": FOOT_CLEARANCE_LABEL_MIN, "label_clearance_joints": FOOT_CLEARANCE_LABEL_JOINTS,
+                "home_joint_pos": home_servo_pos()} if ENABLE_FOOT_CLEARANCE else {}),
         } if ENABLE_EXPERT_BC else None,
     ),
     wandb_project="mjlab_microduck",

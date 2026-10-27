@@ -46,6 +46,7 @@ Obs-contract dependencies (61D actor obs, see AGENTS.md): projected gravity at
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -118,6 +119,34 @@ def default_bc_cfg() -> dict:
         # from the 35° BC gate broke the END of the rise (the expert needs its joints there).
         "expert_mask_cols": (),
         "expert_mask_tilt_deg": 75.0,
+        # Still-on-a-side exemption for expert_mask_cols (2026-10-27, branch standup_foot_catch).
+        # With every joint col masked, the label on a side (tilt ≈ 90°) is a function of
+        # orientation alone → a constant pose, and where that pose does not roll the robot it is a
+        # fixed point: v8's residual stuck states (2-7 %, all lying on a side, legs folded) — the
+        # joint-masked teacher rescues 0 of them, the unmasked one ~all. Exempting EVERY side row
+        # made the teacher's own rises violent (face-up peak |ω| 6.8 → 10 rad/s: the roll from the
+        # back passes through the side orientation), so only rows lying on a side (|g_y|/|g| >
+        # cos(cone)) AND still (|gyro| < still_gyro, mean |joint vel| < still_qvel) keep their
+        # joint obs. Stuck states are still; a roll in progress never is. None = off.
+        "expert_mask_keep_side_cone_deg": None,
+        "expert_mask_still_gyro": 0.3,    # rad/s, obs cols 0:3
+        "expert_mask_still_qvel": 0.4,    # rad/s mean |.|, obs cols 20:34 (noise ±0.25 → ~0.13 at rest)
+        # Foot-clearance projection of the stand teacher's labels (same branch). alpha_stand rolls
+        # from the back by throwing one leg ACROSS the body (left hip_roll target ≈ −1.08) and the
+        # swinging foot meets the other foot on the way: its targets sit at −15 mm box clearance
+        # (pressing through), the executed swing at ~0. Sim tolerates it, hardware slop makes the
+        # foot catch. A label is a joint target (home_joint_pos + action, scale 1.0), the current
+        # joints are in the obs (joint_pos_rel at joint_pos_slice) and the relative foot pose
+        # depends only on the leg joints, so the clearance along the joint-space path current →
+        # target is a pure function of obs + label: labels whose path comes closer than the
+        # minimum are moved by the smallest change of label_clearance_joints that restores it
+        # (foot_clearance.project_min_clearance with start). Closed-loop teacher emulation:
+        # swing clearance p50 +6-9 mm, same |ω|, same rise success. Clear labels are untouched.
+        # Projecting the TARGET pose alone did nothing (the feet meet mid-swing). None = off.
+        "label_min_foot_clearance": None,
+        "label_clearance_joints": (0, 1, 2, 3, 4, 9, 10, 11, 12, 13),
+        "home_joint_pos": None,
+        "joint_pos_slice": (6, 20),
     }
 
 
@@ -127,6 +156,27 @@ class PpoWithExpertBcCfg(PpoWithSymmetryCfg):
 
     bc_cfg: dict | None = field(default_factory=default_bc_cfg)
     class_name: str = "mjlab_microduck.tasks.distill.PpoWithExpertBc"
+
+
+def side_mask_from_obs(obs: torch.Tensor, gravity_slice: tuple[int, int], cone_deg: float) -> torch.Tensor:
+    """Rows lying on a side: gravity within ``cone_deg`` of the body ±y axis."""
+    g = obs[:, gravity_slice[0]:gravity_slice[1]]
+    return g[:, 1].abs() / g.norm(dim=1).clamp(min=1e-6) > math.cos(math.radians(cone_deg))
+
+
+def still_mask_from_obs(obs: torch.Tensor, gyro_thresh: float, qvel_thresh: float) -> torch.Tensor:
+    """Rows not moving: |base ang vel| (cols 0:3) and mean |joint vel| (cols 20:34) below thresholds."""
+    return (obs[:, 0:3].norm(dim=1) < gyro_thresh) & (obs[:, 20:34].abs().mean(dim=1) < qvel_thresh)
+
+
+def project_label_clearance(actions: torch.Tensor, joint_pos_rel: torch.Tensor, cfg: dict) -> torch.Tensor:
+    """Teacher actions → actions whose joint-space path from the current joints (HOME +
+    joint_pos_rel obs) to the target keeps the feet ≥ label_min_foot_clearance apart."""
+    from mjlab_microduck.tasks.foot_clearance import project_min_clearance
+    home = torch.as_tensor(cfg["home_joint_pos"], device=actions.device, dtype=actions.dtype)
+    target = project_min_clearance(home + actions, cfg["label_min_foot_clearance"], tuple(cfg["label_clearance_joints"]),
+                                   start=home + joint_pos_rel)
+    return target - home
 
 
 def fallen_mask_from_obs(obs: torch.Tensor, gravity_slice: tuple[int, int], gate_tilt_deg: float) -> torch.Tensor:
@@ -286,6 +336,11 @@ class PpoWithExpertBc(PPO):
                  "expert_bc_body_teach_frac": body_teach.float().mean().item(),
                  "expert_bc_turn_free_frac": turn_free.float().mean().item()}
         tilted = fallen_mask_from_obs(flat, gsl, cfg.get("expert_mask_tilt_deg", 75.0)) & fallen  # expert_mask_cols rows
+        if cfg.get("expert_mask_keep_side_cone_deg") is not None:
+            still_side = (side_mask_from_obs(flat, gsl, cfg["expert_mask_keep_side_cone_deg"])
+                          & still_mask_from_obs(flat, cfg["expert_mask_still_gyro"], cfg["expert_mask_still_qvel"]))
+            stats["expert_bc_still_side_unmasked_frac"] = (tilted & still_side).float().mean().item()
+            tilted = tilted & ~still_side
         fallen = fallen | body_teach
         if fallen.sum().item() < cfg["min_samples"]:
             fallen = torch.zeros_like(fallen)  # too few fallen frames: anchor-only pass (or nothing)
@@ -306,6 +361,12 @@ class PpoWithExpertBc(PPO):
                 exp_flat = expert_input(torch.cat([exp_td[g] for g in groups], dim=-1), tuple(cfg["twist_slice"]),
                                         tuple(cfg.get("expert_mask_cols", ())), tilted[fallen])
                 target[fallen] = self.expert(_with_flat(exp_td, groups, exp_flat))
+                if cfg.get("label_min_foot_clearance") is not None:
+                    jsl = cfg["joint_pos_slice"]
+                    current = torch.cat([obs_td[fallen][g] for g in groups], dim=-1)[:, jsl[0]:jsl[1]]
+                    raw = target[fallen]
+                    target[fallen] = project_label_clearance(raw, current, cfg)
+                    stats["expert_bc_label_projected_frac"] = (target[fallen] != raw).any(dim=1).float().mean().item()
             if (~fallen).any():
                 anc_td = obs_td[~fallen]
                 if cfg.get("anchor_yaw_remap"):

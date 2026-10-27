@@ -757,6 +757,43 @@ def servo_stall_penalty(
     return stalled.float().sum(dim=1)
 
 
+def _leg_geometry_joint_pos(env: ManagerBasedRlEnv, asset: Entity) -> torch.Tensor:
+    """Servo-order joint angles of the actual limb geometry: servo + its backlash hinge
+    (the ±1° play moves the feet by up to ~6 mm). Identity on models without backlash."""
+    cache = env.__dict__.setdefault("_geometry_joint_ids_cache", {})
+    ids = cache.get(id(asset))
+    if ids is None:
+        sid = _servo_joint_ids(env, asset)
+        names = asset.joint_names
+        bid = [names.index(f"passive_{names[i]}_backlash") if f"passive_{names[i]}_backlash" in names else None for i in sid]
+        ids = cache[id(asset)] = (sid, bid if all(b is not None for b in bid) else None)
+    sid, bid = ids
+    q = asset.data.joint_pos[:, sid]
+    return q + asset.data.joint_pos[:, bid] if bid is not None else q
+
+
+def foot_clearance_cost(
+    env: ManagerBasedRlEnv,
+    min_clearance: float = 0.015,
+    gate_tilt_above_deg: float = 40.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Hinge on the left/right foot-box clearance while FALLEN: (min − clearance)⁺ / min.
+
+    Branch standup_foot_catch (2026-10-27): the get-up swing from the back passes the
+    other foot with a few mm of clearance in sim (v8 p50 4-9 mm), which hardware slop
+    turns into a foot catch that blocks the roll. Clearance from leg FK
+    (tasks/foot_clearance.py, box proxy ≈ mesh − 4 mm), gated to tilt > gate: upright,
+    push-recovery crossover steps legitimately come closer and must stay untaxed.
+    Returns >= 0 → NEGATIVE weight.
+    """
+    from mjlab_microduck.tasks.foot_clearance import foot_clearance
+    asset: Entity = env.scene[asset_cfg.name]
+    c = foot_clearance(torch.nan_to_num(_leg_geometry_joint_pos(env, asset), nan=0.0))
+    cost = (min_clearance - c).clamp(min=0.0) / min_clearance
+    return cost * _fallen_mask(env, asset, 0.0, gate_tilt_above_deg)
+
+
 def servo_acc_spike_penalty(
     env: ManagerBasedRlEnv,
     acc_thresh: float = 300.0,
