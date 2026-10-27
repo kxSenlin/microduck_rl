@@ -15,6 +15,27 @@ sys.path.insert(0, "/Users/remi/mujoco_scenes")
 from scenekit import camera, compose, render, replay  # noqa: E402
 
 
+def annotate(img, a, sc, ys):
+    """Title and lane labels (Pillow: this ffmpeg has no drawtext). Lane labels sit at the projected start line."""
+    if not (a.labels or a.title):
+        return img
+    from PIL import Image, ImageDraw, ImageFont
+    im = Image.fromarray(img)
+    d = ImageDraw.Draw(im)
+    W, H = im.size
+    f_big = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", int(H * 0.04))
+    f = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", int(H * 0.028))
+    if a.title:
+        d.text((int(W * 0.025), int(H * 0.03)), a.title, font=f_big, fill=(255, 255, 255), stroke_width=3, stroke_fill=(10, 20, 30))
+    if a.labels:
+        labels = a.labels.split("|")
+        n = len(labels)
+        for i, lab in enumerate(labels):
+            x = W * (i + 0.5) / n
+            d.text((x, H * 0.93), lab, font=f, fill=(255, 255, 255), anchor="mm", stroke_width=3, stroke_fill=(10, 20, 30))
+    return np.asarray(im)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("log")
@@ -29,6 +50,8 @@ def main():
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--slow", type=float, default=1.0)
     ap.add_argument("--ssaa", type=float, default=1.5)
+    ap.add_argument("--labels", default=None, help="one label per lane, | separated, drawn under the ducks")
+    ap.add_argument("--title", default=None, help="a line of text at the top-left")
     a = ap.parse_args()
     z = np.load(a.log)
     q = z["qpos"]                                     # (envs, T, 21)
@@ -53,7 +76,7 @@ def main():
                 row[0] -= q[i, 0, 0]
                 sc.data.qpos[adrs] = row[cols]
             mujoco.mj_forward(sc.model, sc.data)
-            v.write(r.frame(rig(0.0, sc)))
+            v.write(annotate(r.frame(rig(0.0, sc)), a, sc, ys))
     print("wrote", a.out, len(idx), "frames")
 
 

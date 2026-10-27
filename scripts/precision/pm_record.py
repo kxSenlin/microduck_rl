@@ -14,6 +14,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pm_env import Policy, Sim, rel  # noqa: E402
@@ -53,7 +54,9 @@ def main():
     ap.add_argument("--twist", default="0.4,0,0")
     ap.add_argument("--tap-s", type=float, default=0.3)
     ap.add_argument("--onnx", default=None)
-    ap.add_argument("--units", default="x:0.75")
+    ap.add_argument("--units", default="x:0.3", help="ax:u[,ax:u...] nudges in sequence, the same for every env")
+    ap.add_argument("--per-env", default=None, help="ax:u per env (comma list, one per env), repeated --repeat times")
+    ap.add_argument("--repeat", type=int, default=1)
     ap.add_argument("--go", type=float, default=0.5)
     ap.add_argument("--unwind", type=float, default=1.3)
     ap.add_argument("--gap", type=float, default=0.6, help="walking policy at zero between two nudges")
@@ -81,14 +84,26 @@ def main():
     else:
         nudge = Policy(a.onnx)
         walk_scale = sim.action_scale
-        for item in a.units.split(","):
-            ax, u = item.split(":")
-            cmd = [0.0, 0.0, 0.0]
-            cmd[AX[ax]] = float(u)
-            events.append({"t": len(frames) * sim.dt, "what": f"nudge {ax} {u}"})
+        if a.per_env:
+            per = a.per_env.split(",")
+            assert len(per) == a.envs, "--per-env needs one ax:u per env"
+            cmdv = torch.zeros(a.envs, 3)
+            for i, item in enumerate(per):
+                ax, u = item.split(":")
+                cmdv[i, AX[ax]] = float(u)
+            seq = [cmdv] * a.repeat
+        else:
+            seq = []
+            for item in a.units.split(","):
+                ax, u = item.split(":")
+                c = torch.zeros(a.envs, 3)
+                c[:, AX[ax]] = float(u)
+                seq.append(c)
+        for cmd in seq:
+            events.append({"t": len(frames) * sim.dt, "what": "nudge"})
             sim.action_scale = a.skill_scale if a.skill_scale is not None else walk_scale
             for k in range(int(round((a.go + a.unwind) / sim.dt))):
-                tick(cmd if k * sim.dt < a.go - 1e-6 else [0.0, 0.0, 0.0], policy=nudge, smooth=False)
+                tick(cmd if k * sim.dt < a.go - 1e-6 else torch.zeros(a.envs, 3), policy=nudge, smooth=False)
             sim.action_scale = walk_scale
             for _ in range(int(a.gap / sim.dt)):
                 tick([0.0, 0.0, 0.0])
