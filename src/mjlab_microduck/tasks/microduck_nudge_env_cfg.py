@@ -222,3 +222,8 @@ MicroduckNudgeRlCfg.max_iterations = 3000
 
 MicroduckNudgeRuntimeRlCfg = deepcopy(MicroduckNudgeRlCfg)
 MicroduckNudgeRuntimeRlCfg.algorithm.entropy_coef = RUNTIME_ENTROPY_COEF
+
+# Safe fine-tune (run 6, from run 5 @1500): run 5 degraded from ~1700 the way run 4 did, only slower (action std
+# 0.26 -> 0.34, end pose 2.5 -> 0.09): no entropy bonus at all for the fine-tune.
+MicroduckNudgeRuntimeSafeRlCfg = deepcopy(MicroduckNudgeRuntimeRlCfg)
+MicroduckNudgeRuntimeSafeRlCfg.algorithm.entropy_coef = 0.0
