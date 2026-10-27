@@ -30,7 +30,7 @@ from dataclasses import fields
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
-from mjlab.managers import ObservationTermCfg, RewardTermCfg
+from mjlab.managers import CurriculumTermCfg, ObservationTermCfg, RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.velocity import mdp
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_ALLCOLLISIONS_ROBOT_CFG
@@ -66,12 +66,22 @@ SLIP_WEIGHT = -5.0                    # planted feet must not slide (always on, 
 TERMINATION_WEIGHT = -10.0
 STAND_Z = (0.116, 0.119)              # spawn just above the measured standing trunk height (0.1158)
 
+# Runtime layer (run 3, resumed from run 2): robotd's walk-mode action path, eased in. In sim, run 2's policy @250
+# landed a 1.5 cm request at 10.4 +- 3.3 mm with the training's plain action, and scattered up to +-8 cm sideways with
+# robotd's 0.9 scale + leg/head low-pass (scripts/precision/pm_skill_eval.py). Stages in iterations.
+RUNTIME_LAYER_STAGES = (
+    (0, 1.0, 1.0, 1.0, 1.0),          # (iteration, leg alpha, head alpha, scale lo, scale hi): the plain action
+    (150, 0.85, 0.75, 0.9, 1.0),
+    (300, 0.7, 0.5, 0.8, 1.0),        # robotd: legs_lowpass 0.7, head_lowpass 0.5, 0.9 x battery adaptation
+)
+RUNTIME_ACTION_RATE = -1.0            # run 3 starts where run 2's action-rate curriculum ends
+
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
                 "foot_swing_height", "foot_slip", "head_pose_bias", "body_pose_tracking")
 DROP_CURRICULA = ("standing_envs", "head_pose_bias_weight", "body_pose_range", "head_pose_range")
 
 
-def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False) -> ManagerBasedRlEnvCfg:
+def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtime_layer: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = make_microduck_velocity_env_cfg(play=play, rough=False)
 
     # velstand's model and contact budget (the actor comes from velstand)
@@ -88,6 +98,21 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False) -> Man
     if "action_rate_weight" in cfg.curriculum:
         cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
             {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in ACTION_RATE_STAGES]
+
+    if runtime_layer:
+        old_act = cfg.actions["joint_pos"]
+        keep = {f.name for f in fields(microduck_mdp.RuntimeLayerJointPositionActionCfg)}
+        _, leg, head, lo, hi = RUNTIME_LAYER_STAGES[-1] if play else RUNTIME_LAYER_STAGES[0]
+        cfg.actions["joint_pos"] = microduck_mdp.RuntimeLayerJointPositionActionCfg(
+            **{k: v for k, v in vars(old_act).items() if k in keep}, leg_alpha=leg, head_alpha=head, scale_lo=lo, scale_hi=hi)
+        if not play:
+            cfg.curriculum["runtime_layer"] = CurriculumTermCfg(
+                func=microduck_mdp.runtime_layer_curriculum,
+                params={"stages": [{"step": it * NUM_STEPS_PER_ENV, "leg_alpha": la, "head_alpha": ha,
+                                    "scale_lo": sl, "scale_hi": sh} for it, la, ha, sl, sh in RUNTIME_LAYER_STAGES]})
+        cfg.rewards["action_rate_l2"].weight = RUNTIME_ACTION_RATE
+        if "action_rate_weight" in cfg.curriculum:
+            cfg.curriculum["action_rate_weight"].params["weight_stages"] = [{"step": 0, "weight": RUNTIME_ACTION_RATE}]
 
     cfg.episode_length_s = EPISODE_S
     cfg.events.pop("push_robot", None)

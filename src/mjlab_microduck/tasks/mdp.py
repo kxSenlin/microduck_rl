@@ -76,6 +76,7 @@ print("[mdp] Patches 1-2 active: NaN-safe reward/advantage")
 # ---------------------------------------------------------------------------
 from mjlab.rl import exporter_utils as _exporter_utils  # noqa: E402
 from mjlab.envs.mdp.actions import JointPositionAction as _JointAction  # noqa: E402
+from mjlab.envs.mdp.actions import JointPositionActionCfg as _JointActionCfg  # noqa: E402
 
 def _get_base_metadata_no_passive(env, run_path):
     robot = env.scene["robot"]
@@ -7926,3 +7927,67 @@ def nudge_metrics(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.
         env.extras["log"]["Metrics/nudge_final_err_y_mm"] = 1000 * e[:, 1].abs().mean()
         env.extras["log"]["Metrics/nudge_final_err_yaw_deg"] = torch.rad2deg(e[:, 2].abs()).mean()
     return torch.zeros(env.num_envs, device=env.device)
+
+
+class RuntimeLayerJointPositionAction(_JointAction):
+    """Joint targets the way robotd makes them, for policies that run on its walk-mode defaults:
+    target = HOME + scale x action, then a first-order low-pass per tick (legs alpha 0.7, head 0.5:
+    robotd-params `legs_lowpass` / `head_lowpass`). `scale` is drawn per episode in [scale_lo, scale_hi]: robotd's
+    action_scale 0.9 times its battery adaptation (7.4 V / pack, 0.8-1.0 over a charge). The observed last action
+    stays the RAW policy output, as robotd keeps it. The filter starts at HOME on reset. `set_layer` lets a
+    curriculum ease it in (alpha 1 and scale 1 = the plain action)."""
+
+    def __init__(self, cfg: "RuntimeLayerJointPositionActionCfg", env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._is_head = torch.zeros((1, self._num_targets), dtype=torch.bool, device=self.device)
+        for i, name in enumerate(self._target_names):
+            if ("neck" in name) or ("head" in name):
+                self._is_head[0, i] = True
+        self._scale_env = torch.ones((self.num_envs, 1), device=self.device)
+        self._filtered = self._entity.data.default_joint_pos[:, self._target_ids].clone()
+        self.set_layer(cfg.leg_alpha, cfg.head_alpha, cfg.scale_lo, cfg.scale_hi)
+
+    def set_layer(self, leg_alpha: float, head_alpha: float, scale_lo: float, scale_hi: float) -> None:
+        self._alpha = torch.where(self._is_head, torch.tensor(float(head_alpha), device=self.device),
+                                  torch.tensor(float(leg_alpha), device=self.device))
+        self._scale_range = (float(scale_lo), float(scale_hi))
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        self._raw_actions[:] = actions
+        target = self._raw_actions * self._scale * self._scale_env + self._offset
+        self._filtered = self._alpha * target + (1.0 - self._alpha) * self._filtered
+        self._processed_actions = self._filtered.clone()
+
+    def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+        super().reset(env_ids)
+        if env_ids is None:
+            env_ids = slice(None)
+        default = self._entity.data.default_joint_pos[:, self._target_ids]
+        self._filtered[env_ids] = default[env_ids]
+        n = self._scale_env[env_ids].shape[0]
+        lo, hi = self._scale_range
+        self._scale_env[env_ids] = lo + (hi - lo) * torch.rand((n, 1), device=self.device)
+
+
+@_dataclass(kw_only=True)
+class RuntimeLayerJointPositionActionCfg(_JointActionCfg):
+    leg_alpha: float = 0.7
+    head_alpha: float = 0.5
+    scale_lo: float = 0.8
+    scale_hi: float = 1.0
+
+    def build(self, env: ManagerBasedRlEnv) -> RuntimeLayerJointPositionAction:
+        return RuntimeLayerJointPositionAction(self, env)
+
+
+def runtime_layer_curriculum(env: ManagerBasedRlEnv, env_ids: torch.Tensor, stages: list[dict]) -> torch.Tensor:
+    """Ease robotd's action layer in: `stages` = [{"step", "leg_alpha", "head_alpha", "scale_lo", "scale_hi"}, ...]
+    (env steps). The last stage must be robotd's walk-mode defaults."""
+    del env_ids
+    cur = stages[0]
+    for st in stages:
+        if env.common_step_counter >= st["step"]:
+            cur = st
+    term = env.action_manager.get_term("joint_pos")
+    term.set_layer(cur["leg_alpha"], cur["head_alpha"], cur["scale_lo"], cur["scale_hi"])
+    return torch.tensor([float(cur["leg_alpha"])])
