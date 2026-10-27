@@ -174,9 +174,11 @@ def project_label_clearance(actions: torch.Tensor, joint_pos_rel: torch.Tensor, 
     joint_pos_rel obs) to the target keeps the feet ≥ label_min_foot_clearance apart."""
     from mjlab_microduck.tasks.foot_clearance import project_min_clearance
     home = torch.as_tensor(cfg["home_joint_pos"], device=actions.device, dtype=actions.dtype)
-    target = project_min_clearance(home + actions, cfg["label_min_foot_clearance"], tuple(cfg["label_clearance_joints"]),
+    q0 = home + actions
+    target = project_min_clearance(q0, cfg["label_min_foot_clearance"], tuple(cfg["label_clearance_joints"]),
                                    start=home + joint_pos_rel)
-    return target - home
+    # (home + a) - home != a in float32: return untouched rows bit-exact so the projected_frac stat is honest
+    return torch.where((target != q0).any(dim=1, keepdim=True), target - home, actions)
 
 
 def fallen_mask_from_obs(obs: torch.Tensor, gravity_slice: tuple[int, int], gate_tilt_deg: float) -> torch.Tensor:

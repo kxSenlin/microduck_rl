@@ -120,3 +120,12 @@ def test_velstand_wiring():
     assert bc["label_min_foot_clearance"] == vs.FOOT_CLEARANCE_LABEL_MIN
     assert bc["expert_mask_keep_side_cone_deg"] == vs.TEACHER_MASK_KEEP_SIDE_CONE_DEG
     assert tuple(bc["home_joint_pos"]) == home_servo_pos()
+
+
+def test_label_projection_leaves_clear_rows_bit_exact():
+    cfg = {"label_min_foot_clearance": 0.015, "label_clearance_joints": (0, 1, 2, 3, 4, 9, 10, 11, 12, 13),
+           "home_joint_pos": home_servo_pos()}
+    a = (torch.rand(64, 14, generator=torch.Generator().manual_seed(1)) * 2 - 1) * 0.05  # near HOME: feet clear
+    with torch.no_grad():
+        out = distill.project_label_clearance(a, torch.zeros_like(a), cfg)
+    assert torch.equal(out, a)  # the expert_bc_label_projected_frac stat counts exact changes
