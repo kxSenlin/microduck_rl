@@ -65,9 +65,11 @@ def main():
             if rec: frames.append(sim.qpos(rec))
         s0 = sim.stance()
         marks.append(len(frames))
+        gz_max = torch.full((sim.n,), -1.0)          # projected gravity z: -1 upright, -0.7 = 45 deg tilt
         sim.action_scale = a.scale if a.scale is not None else walk_scale
         for k in range(int(round((a.go + a.unwind) / sim.dt))):
             sim.step(cmd if k * sim.dt < a.go - 1e-6 else [0.0, 0.0, 0.0], policy=nudge, smooth=False)
+            gz_max = torch.maximum(gz_max, sim.robot.data.projected_gravity_b[:, 2])
             if rec: frames.append(sim.qpos(rec))
         sim.action_scale = walk_scale
         s_skill = sim.stance()
@@ -76,6 +78,7 @@ def main():
         dk = rel(s_skill, s0)
         for _ in range(int(a.after / sim.dt)):
             sim.step([0.0, 0.0, 0.0])
+            gz_max = torch.maximum(gz_max, sim.robot.data.projected_gravity_b[:, 2])
             if rec: frames.append(sim.qpos(rec))
         d = rel(sim.stance(), s0)
         dh = rel(sim.stance(), s_skill)
@@ -84,7 +87,8 @@ def main():
                      "skill_fwd_mm": (dk[:, 0] * 1000).tolist(), "skill_left_mm": (dk[:, 1] * 1000).tolist(),
                      "skill_yaw_deg": (dk[:, 2] * 180 / math.pi).tolist(),
                      "handback_mm": (torch.norm(dh[:, :2], dim=1) * 1000).tolist(),
-                     "handback_deg": (dh[:, 2].abs() * 180 / math.pi).tolist(), "upright": sim.upright().tolist()})
+                     "handback_deg": (dh[:, 2].abs() * 180 / math.pi).tolist(), "upright": sim.upright().tolist(),
+                     "max_tilt_deg": torch.rad2deg(torch.acos(torch.clamp(-gz_max, -1, 1))).tolist()})
     f = np.array(sum((r["fwd_mm"] for r in rows), []))
     l = np.array(sum((r["left_mm"] for r in rows), []))
     y = np.array(sum((r["yaw_deg"] for r in rows), []))
@@ -93,10 +97,12 @@ def main():
     kl = np.array(sum((r["skill_left_mm"] for r in rows), []))
     ky = np.array(sum((r["skill_yaw_deg"] for r in rows), []))
     up = sum(sum(r["upright"]) for r in rows)
+    tilt = np.array(sum((r["max_tilt_deg"] for r in rows), []))
+    fell = int((tilt > 45).sum())
     tgt = a.units * UNIT[a.axis]
     print(f"nudge {a.axis} {a.units:+.2f} units (target {tgt:+.1f} {'deg' if a.axis == 'w' else 'mm'}): n={len(f)}  "
           f"fwd {f.mean():+.1f}±{f.std():.1f} mm  left {l.mean():+.1f}±{l.std():.1f} mm  yaw {y.mean():+.1f}±{y.std():.1f}°  "
-          f"handback drift {hb.mean():.1f} mm  upright {up}/{len(f)}  [{time.time() - t0:.0f}s]\n"
+          f"handback drift {hb.mean():.1f} mm  fell {fell}/{len(f)} (max tilt p95 {np.percentile(tilt, 95):.0f} deg)  upright {up}/{len(f)}  [{time.time() - t0:.0f}s]\n"
           f"   at the skill's end: fwd {kf.mean():+.1f}±{kf.std():.1f} mm  left {kl.mean():+.1f}±{kl.std():.1f} mm  "
           f"yaw {ky.mean():+.1f}±{ky.std():.1f}°", flush=True)
     out = {"args": vars(a), "rows": rows, "target": tgt}
