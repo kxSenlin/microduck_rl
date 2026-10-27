@@ -144,11 +144,6 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
             cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
                 {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in RUNTIME_ACTION_RATE_STAGES]
 
-    if safe:
-        cfg.rewards["termination"].weight = SAFE_TERMINATION_WEIGHT
-        if "fell_over" in cfg.terminations:
-            cfg.terminations["fell_over"].params["limit_angle"] = SAFE_FALL_ANGLE
-
     cfg.episode_length_s = pre_s + GO_S + SETTLE_S + post_s
     cfg.events.pop("push_robot", None)
     rb = cfg.events["reset_base"].params
@@ -211,6 +206,10 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         func=microduck_mdp.nudge_metrics, weight=0.0, params={"command_name": "twist"})
     # weight-0 terms are not logged at all: give the logger a vanishing weight
     cfg.rewards["nudge_metrics"].weight = 1.0e-9
+    if safe:
+        cfg.rewards["termination"].weight = SAFE_TERMINATION_WEIGHT
+        if "fell_over" in cfg.terminations:
+            cfg.terminations["fell_over"].params["limit_angle"] = SAFE_FALL_ANGLE
     return cfg
 
 
