@@ -7778,6 +7778,12 @@ class NudgeCommand(UniformVelocityCommand):
         """Seconds since the go onset (negative during the standing prelude)."""
         return self._env.episode_length_buf.float() * self._env.step_dt - self.cfg.pre_s
 
+    def outside_skill(self) -> torch.Tensor:
+        """(n,) True before the go onset and after the skill's end (go_s + unwind_s): robotd runs the walking policy
+        there."""
+        t = self.elapsed()
+        return (t < -1e-6) | (t >= self.cfg.go_s + self.cfg.unwind_s - 1e-6)
+
     def compute(self, dt: float) -> None:
         t = self.elapsed()
         pend = self.start_pending & (t >= -1e-6)
@@ -7827,6 +7833,7 @@ class NudgeCommandCfg(UniformVelocityCommandCfg):
     class_type: type = NudgeCommand
     pre_s: float = 0.0                                 # zeros before the go window (standing prelude)
     go_s: float = 0.5                                  # robotd skill `duration`; unwind (zeros) after it
+    unwind_s: float = 1.3                              # robotd skill `unwind_s`: the skill ends at go_s + unwind_s
     axis_probs: tuple = (0.35, 0.30, 0.35)             # x, y, yaw
     dist_range_m: tuple = (0.005, 0.03)                # x, y moves: 0.5-3 cm
     yaw_range_rad: tuple = (math.radians(2.5), math.radians(15.0))
@@ -7884,6 +7891,7 @@ def nudge_end_pose(
     command_name: str = "twist",
     after_s: float = 1.1,
     std: float = 0.1,
+    until_s: float = 1.0e9,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """exp(-mean over the 14 servos of ((q - HOME) / std)^2) after `after_s`: end in the standing pose the walking
@@ -7893,7 +7901,8 @@ def nudge_end_pose(
     asset: Entity = env.scene[asset_cfg.name]
     ids = _servo_joint_ids(env, asset)
     dq = asset.data.joint_pos[:, ids] - asset.data.default_joint_pos[:, ids]
-    on = (term.elapsed() >= after_s).float()
+    t = term.elapsed()
+    on = ((t >= after_s) & (t < until_s)).float()
     return torch.nan_to_num(torch.exp(-(dq / std).pow(2).mean(dim=1)) * on, nan=0.0)
 
 
@@ -7911,14 +7920,16 @@ def nudge_still(
     env: ManagerBasedRlEnv,
     command_name: str = "twist",
     after_s: float = 1.2,
+    until_s: float = 1.0e9,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Motion at the end of the episode: trunk linear speed (m/s, x10) squared + yaw/roll/pitch rate squared + 0.1 x
+    """Motion at the end of the episode (or of the skill, `until_s`): trunk linear speed (m/s, x10) squared + yaw/roll/pitch rate squared + 0.1 x
     mean servo speed squared, after `after_s`. The walking policy takes over from here: it must find the duck still.
     Positive quantity, negative weight."""
     term = _nudge_term(env, command_name)
     asset: Entity = env.scene[asset_cfg.name]
-    on = (term.elapsed() >= after_s).float()
+    t = term.elapsed()
+    on = ((t >= after_s) & (t < until_s)).float()
     lin = (10.0 * asset.data.root_link_lin_vel_w[:, :2]).pow(2).sum(dim=1)
     ang = asset.data.root_link_ang_vel_w.pow(2).sum(dim=1)
     # x0.1: servo jitter from the exploration noise must not outweigh the trunk being still
@@ -7926,12 +7937,14 @@ def nudge_still(
     return torch.nan_to_num((lin + ang + jv) * on, nan=0.0)
 
 
-def nudge_feet_down(env: ManagerBasedRlEnv, sensor_name: str, command_name: str = "twist", after_s: float = 1.2) -> torch.Tensor:
-    """1 while both feet touch the floor after `after_s`, else 0: end on two feet. Positive weight."""
+def nudge_feet_down(env: ManagerBasedRlEnv, sensor_name: str, command_name: str = "twist", after_s: float = 1.2,
+                    until_s: float = 1.0e9) -> torch.Tensor:
+    """1 while both feet touch the floor between `after_s` and `until_s`, else 0: end on two feet. Positive weight."""
     term = _nudge_term(env, command_name)
     found = env.scene[sensor_name].data.found
     both = (found > 0).all(dim=1).float()
-    return both * (term.elapsed() >= after_s).float()
+    t = term.elapsed()
+    return both * ((t >= after_s) & (t < until_s)).float()
 
 
 def nudge_metrics(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
@@ -7957,6 +7970,7 @@ class RuntimeLayerJointPositionAction(_JointAction):
 
     def __init__(self, cfg: "RuntimeLayerJointPositionActionCfg", env: ManagerBasedRlEnv):
         super().__init__(cfg, env)
+        self._handover = OnnxMlp.from_hub(*cfg.handover_policy, device=self.device) if cfg.handover_policy else None
         self._is_head = torch.zeros((1, self._num_targets), dtype=torch.bool, device=self.device)
         for i, name in enumerate(self._target_names):
             if ("neck" in name) or ("head" in name):
@@ -7971,6 +7985,17 @@ class RuntimeLayerJointPositionAction(_JointAction):
         self._scale_range = (float(scale_lo), float(scale_hi))
 
     def process_actions(self, actions: torch.Tensor) -> None:
+        if self._handover is not None:
+            # robotd's sequence around a skill: the walking policy drives before and after it. Its output replaces
+            # the trained policy's there (and is what the next observation reports as the last action).
+            outside = self._env.command_manager.get_term(self.cfg.command_name).outside_skill()
+            if outside.any():
+                with torch.no_grad():
+                    walk = self._handover(self._env.obs_buf["actor"])
+                actions = torch.where(outside[:, None], walk, actions)
+                # robotd observes the output it applied: the next observation's last action is the walking policy's
+                # (this term is the env's only action term, so it owns the whole action vector)
+                self._env.action_manager._action[:] = actions
         self._raw_actions[:] = actions
         target = self._raw_actions * self._scale * self._scale_env + self._offset
         self._filtered = self._alpha * target + (1.0 - self._alpha) * self._filtered
@@ -7993,6 +8018,10 @@ class RuntimeLayerJointPositionActionCfg(_JointActionCfg):
     head_alpha: float = 0.5
     scale_lo: float = 0.8
     scale_hi: float = 1.0
+    # (repo, file, revision) of a deployed 61 -> 14 ONNX that drives the robot outside the skill window of the
+    # NudgeCommand `command_name` (robotd's walking policy before and after a one-shot skill); None = never
+    handover_policy: tuple | None = None
+    command_name: str = "twist"
 
     def build(self, env: ManagerBasedRlEnv) -> RuntimeLayerJointPositionAction:
         return RuntimeLayerJointPositionAction(self, env)
@@ -8009,3 +8038,39 @@ def runtime_layer_curriculum(env: ManagerBasedRlEnv, env_ids: torch.Tensor, stag
     term = env.action_manager.get_term("joint_pos")
     term.set_layer(cur["leg_alpha"], cur["head_alpha"], cur["scale_lo"], cur["scale_hi"])
     return torch.tensor([float(cur["leg_alpha"])])
+
+
+class OnnxMlp(torch.nn.Module):
+    """A deployed microduck ONNX (obs normalizer baked: (obs - mean) / div, then Gemm/ELU x3, Gemm) as a frozen torch
+    module, batched, on any device. Used to put robotd's walking policy in the training loop."""
+
+    def __init__(self, path: str, device="cpu"):
+        super().__init__()
+        import onnx
+        from onnx import numpy_helper
+        init = {i.name: torch.as_tensor(numpy_helper.to_array(i).copy()) for i in onnx.load(path).graph.initializer}
+        div = next(k for k in init if k.startswith("onnx::Div"))
+        self.register_buffer("mean", init["obs_normalizer._mean"].float())
+        self.register_buffer("div", init[div].float())
+        self.layers = torch.nn.ModuleList()
+        for i in (0, 2, 4, 6):
+            w, b = init[f"mlp.{i}.weight"].float(), init[f"mlp.{i}.bias"].float()
+            lin = torch.nn.Linear(w.shape[1], w.shape[0])
+            lin.weight.data.copy_(w)
+            lin.bias.data.copy_(b)
+            self.layers.append(lin)
+        self.requires_grad_(False)
+        self.to(device)
+
+    @classmethod
+    def from_hub(cls, repo: str, file: str, revision: str | None = None, device="cpu") -> "OnnxMlp":
+        from huggingface_hub import hf_hub_download
+        return cls(hf_hub_download(repo, file, revision=revision), device=device)
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        x = (obs - self.mean) / self.div
+        for i, lin in enumerate(self.layers):
+            x = lin(x)
+            if i < len(self.layers) - 1:
+                x = torch.nn.functional.elu(x)
+        return x

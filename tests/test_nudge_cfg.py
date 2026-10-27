@@ -101,3 +101,15 @@ def test_episode_ends_in_the_standing_pose():
     end = cfg.rewards["nudge_end_pose"]
     assert end.weight >= cfg.rewards["nudge_hold"].weight          # as valuable as being on target
     assert end.params["after_s"] > nudge.GO_S and end.params["std"] <= 0.15
+
+
+def test_runtime_variant_puts_the_walking_policy_around_the_skill():
+    cfg = make_microduck_nudge_env_cfg(runtime_layer=True)
+    act = cfg.actions["joint_pos"]
+    assert act.handover_policy == ("pollen-robotics/microduck-policies", "velstand.onnx", "v8")
+    cmd = cfg.commands["twist"]
+    assert cmd.pre_s == nudge.HANDOVER_PRE_S and cmd.unwind_s == nudge.SETTLE_S
+    assert math.isclose(cfg.episode_length_s, nudge.HANDOVER_PRE_S + nudge.GO_S + nudge.SETTLE_S + nudge.HANDOVER_POST_S)
+    # the hold terms keep scoring after the hand-back; the end pose and stillness stop at the skill's end
+    assert "until_s" not in cfg.rewards["nudge_hold"].params
+    assert math.isclose(cfg.rewards["nudge_end_pose"].params["until_s"], nudge.GO_S + nudge.SETTLE_S)

@@ -80,6 +80,15 @@ RUNTIME_LAYER_STAGES = (
 )
 RUNTIME_ACTION_RATE_STAGES = ((0, -0.2), (1200, -0.5), (2000, -1.0))
 
+# Hand-overs (run 4): robotd runs the walking policy before and after a skill. Run 3 @250 moved in its own env (0.3 s
+# after the spawn drop) but not from a settled stand, and run 2's crouched ending made velstand wander after the
+# hand-back. So the runtime variant puts velstand v8 itself in the loop (RuntimeLayerJointPositionAction
+# handover_policy): it stands for HANDOVER_PRE_S, the trained policy runs the skill, velstand takes over for
+# HANDOVER_POST_S, and the hold terms keep scoring through that last part (its drift counts).
+HANDOVER_POLICY = ("pollen-robotics/microduck-policies", "velstand.onnx", "v8")
+HANDOVER_PRE_S = 0.8
+HANDOVER_POST_S = 0.5
+
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
                 "foot_swing_height", "foot_slip", "head_pose_bias", "body_pose_tracking")
 DROP_CURRICULA = ("standing_envs", "head_pose_bias_weight", "body_pose_range", "head_pose_range")
@@ -87,6 +96,8 @@ DROP_CURRICULA = ("standing_envs", "head_pose_bias_weight", "body_pose_range", "
 
 def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtime_layer: bool = False) -> ManagerBasedRlEnvCfg:
     cfg = make_microduck_velocity_env_cfg(play=play, rough=False)
+    pre_s = HANDOVER_PRE_S if runtime_layer else PRE_S
+    post_s = HANDOVER_POST_S if runtime_layer else 0.0
 
     # velstand's model and contact budget (the actor comes from velstand)
     cfg.scene.entities = {"robot": MICRODUCK_ALLCOLLISIONS_ROBOT_CFG}
@@ -108,7 +119,8 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         keep = {f.name for f in fields(microduck_mdp.RuntimeLayerJointPositionActionCfg)}
         _, leg, head, lo, hi = RUNTIME_LAYER_STAGES[-1] if play else RUNTIME_LAYER_STAGES[0]
         cfg.actions["joint_pos"] = microduck_mdp.RuntimeLayerJointPositionActionCfg(
-            **{k: v for k, v in vars(old_act).items() if k in keep}, leg_alpha=leg, head_alpha=head, scale_lo=lo, scale_hi=hi)
+            **{k: v for k, v in vars(old_act).items() if k in keep}, leg_alpha=leg, head_alpha=head, scale_lo=lo, scale_hi=hi,
+            handover_policy=HANDOVER_POLICY, command_name="twist")
         if not play:
             cfg.curriculum["runtime_layer"] = CurriculumTermCfg(
                 func=microduck_mdp.runtime_layer_curriculum,
@@ -119,7 +131,7 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
             cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
                 {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in RUNTIME_ACTION_RATE_STAGES]
 
-    cfg.episode_length_s = EPISODE_S
+    cfg.episode_length_s = pre_s + GO_S + SETTLE_S + post_s
     cfg.events.pop("push_robot", None)
     rb = cfg.events["reset_base"].params
     rb["pose_range"]["z"] = STAND_Z
@@ -131,7 +143,8 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
     cfg.commands["twist"] = microduck_mdp.NudgeCommandCfg(
         **{**{k: v for k, v in vars(old).items() if k in keep}, "class_type": microduck_mdp.NudgeCommand,
            "rel_standing_envs": 0.0, "rel_heading_envs": 0.0, "resampling_time_range": (1.0e6, 1.0e6)},
-        pre_s=PRE_S, go_s=GO_S, axis_probs=AXIS_PROBS, dist_range_m=DIST_RANGE_M, yaw_range_rad=YAW_RANGE_RAD,
+        pre_s=pre_s, go_s=GO_S, unwind_s=SETTLE_S, axis_probs=AXIS_PROBS, dist_range_m=DIST_RANGE_M,
+        yaw_range_rad=YAW_RANGE_RAD,
         zero_prob=ZERO_PROB,
     )
     head = cfg.commands["head_pose"]
@@ -156,10 +169,12 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         func=microduck_mdp.nudge_hold, weight=HOLD_FINE_WEIGHT,
         params={"command_name": "twist", "std": HOLD_FINE_STD, "after_s": HOLD_AFTER_S})
     cfg.rewards["nudge_still"] = RewardTermCfg(
-        func=microduck_mdp.nudge_still, weight=STILL_WEIGHT, params={"command_name": "twist", "after_s": STILL_AFTER_S})
+        func=microduck_mdp.nudge_still, weight=STILL_WEIGHT,
+        params={"command_name": "twist", "after_s": STILL_AFTER_S, "until_s": GO_S + SETTLE_S})
     cfg.rewards["nudge_feet_down"] = RewardTermCfg(
         func=microduck_mdp.nudge_feet_down, weight=FEET_DOWN_WEIGHT,
-        params={"sensor_name": "feet_ground_contact", "command_name": "twist", "after_s": STILL_AFTER_S})
+        params={"sensor_name": "feet_ground_contact", "command_name": "twist", "after_s": STILL_AFTER_S,
+                "until_s": GO_S + SETTLE_S})
     cfg.rewards["nudge_slip"] = RewardTermCfg(
         func=mdp.feet_slip, weight=SLIP_WEIGHT,
         params={"sensor_name": "feet_ground_contact", "command_name": "twist", "command_threshold": -1.0,
@@ -172,7 +187,7 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
     cfg.rewards["pose"].weight = POSE_WEIGHT
     cfg.rewards["nudge_end_pose"] = RewardTermCfg(
         func=microduck_mdp.nudge_end_pose, weight=END_POSE_WEIGHT,
-        params={"command_name": "twist", "after_s": END_POSE_AFTER_S, "std": END_POSE_STD})
+        params={"command_name": "twist", "after_s": END_POSE_AFTER_S, "std": END_POSE_STD, "until_s": GO_S + SETTLE_S})
     cfg.rewards["termination"] = RewardTermCfg(func=envs_mdp.is_terminated, weight=TERMINATION_WEIGHT)
     cfg.rewards["nudge_metrics"] = RewardTermCfg(
         func=microduck_mdp.nudge_metrics, weight=0.0, params={"command_name": "twist"})
