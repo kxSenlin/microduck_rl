@@ -88,6 +88,8 @@ def test_runtime_layer_variant_ends_on_robotds_defaults():
     assert (first["leg_alpha"], first["scale_lo"]) == (1.0, 1.0)             # starts as the plain action
     assert (last["leg_alpha"], last["head_alpha"]) == (0.7, 0.5)             # robotd legs_lowpass / head_lowpass
     assert last["scale_lo"] <= 0.9 * 7.4 / 8.4 + 0.01 and last["scale_hi"] >= 0.9 * 7.4 / 6.8 - 0.01
-    assert cfg.rewards["action_rate_l2"].weight == nudge.RUNTIME_ACTION_RATE
+    assert cfg.rewards["action_rate_l2"].weight == nudge.RUNTIME_ACTION_RATE_STAGES[0][1]
+    ar = cfg.curriculum["action_rate_weight"].params["weight_stages"]
+    assert ar[-1]["weight"] == -1.0 and ar[0]["weight"] > ar[-1]["weight"]
     play = make_microduck_nudge_env_cfg(play=True, runtime_layer=True).actions["joint_pos"]
     assert (play.leg_alpha, play.head_alpha) == (0.7, 0.5)

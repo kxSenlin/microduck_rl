@@ -74,7 +74,7 @@ RUNTIME_LAYER_STAGES = (
     (150, 0.85, 0.75, 0.9, 1.0),
     (300, 0.7, 0.5, 0.8, 1.0),        # robotd: legs_lowpass 0.7, head_lowpass 0.5, 0.9 x battery adaptation
 )
-RUNTIME_ACTION_RATE = -1.0            # run 3 starts where run 2's action-rate curriculum ends
+RUNTIME_ACTION_RATE_STAGES = ((0, -0.5), (800, -1.0))   # run 3 resumes from run 2 @~1500 (action rate -0.2 -> -0.5 there)
 
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
                 "foot_swing_height", "foot_slip", "head_pose_bias", "body_pose_tracking")
@@ -110,9 +110,10 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
                 func=microduck_mdp.runtime_layer_curriculum,
                 params={"stages": [{"step": it * NUM_STEPS_PER_ENV, "leg_alpha": la, "head_alpha": ha,
                                     "scale_lo": sl, "scale_hi": sh} for it, la, ha, sl, sh in RUNTIME_LAYER_STAGES]})
-        cfg.rewards["action_rate_l2"].weight = RUNTIME_ACTION_RATE
+        cfg.rewards["action_rate_l2"].weight = RUNTIME_ACTION_RATE_STAGES[0][1]
         if "action_rate_weight" in cfg.curriculum:
-            cfg.curriculum["action_rate_weight"].params["weight_stages"] = [{"step": 0, "weight": RUNTIME_ACTION_RATE}]
+            cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
+                {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in RUNTIME_ACTION_RATE_STAGES]
 
     cfg.episode_length_s = EPISODE_S
     cfg.events.pop("push_robot", None)
