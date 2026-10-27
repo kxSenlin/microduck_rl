@@ -8059,6 +8059,33 @@ def handover_imitation(env: ManagerBasedRlEnv, action_name: str = "joint_pos") -
     return torch.nan_to_num(gap * term.outside.float(), nan=0.0)
 
 
+def nudge_target_overrun(
+    env: ManagerBasedRlEnv,
+    margin: float = 0.05,
+    hip_roll_margin: float = 0.2,
+    action_name: str = "joint_pos",
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Commanded joint targets past the joint ranges, summed over servos (rad), beyond a margin: robotd clamps
+    targets only to +-pi, so a target far past a limit drives the real servo into its stop at full torque (feedback
+    of 2026-10-10). Hip roll gets a wider margin: the model's +-0.38 rad is narrower than the real joint (the rest pose
+    sits at -0.57) and the shipped velstand already commands 0.43 past it. Only ticks where the trained policy acts
+    count (outside the skill the walking policy drives). Run 5 @1500: head roll +0.53, right hip roll +0.56.
+    Positive quantity, negative weight."""
+    term = env.action_manager.get_term(action_name)
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = term._target_ids
+    lim = asset.data.joint_pos_limits[:, ids]
+    tgt = term._processed_actions
+    m = torch.full((1, len(ids)), margin, device=env.device)
+    for i, name in enumerate(term._target_names):
+        if "hip_roll" in name:
+            m[0, i] = hip_roll_margin
+    over = torch.relu(tgt - lim[..., 1] - m) + torch.relu(lim[..., 0] - tgt - m)
+    inside = ~getattr(term, "outside", torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
+    return torch.nan_to_num(over.sum(dim=1) * inside.float(), nan=0.0)
+
+
 class OnnxMlp(torch.nn.Module):
     """A deployed microduck ONNX (obs normalizer baked: (obs - mean) / div, then Gemm/ELU x3, Gemm) as a frozen torch
     module, batched, on any device. Used to put robotd's walking policy in the training loop."""

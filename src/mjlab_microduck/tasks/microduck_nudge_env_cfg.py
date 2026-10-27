@@ -97,6 +97,7 @@ HANDOVER_IMITATION_WEIGHT = -5.0
 # episode ends at a smaller tilt.
 SAFE_TERMINATION_WEIGHT = -100.0
 SAFE_FALL_ANGLE = math.radians(40.0)
+SAFE_OVERRUN_WEIGHT = -10.0           # per rad of commanded target past a joint range (beyond the margins)
 RUNTIME_ENTROPY_COEF = 0.005
 
 DROP_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time", "foot_clearance",
@@ -210,6 +211,7 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False, runtim
         cfg.rewards["termination"].weight = SAFE_TERMINATION_WEIGHT
         if "fell_over" in cfg.terminations:
             cfg.terminations["fell_over"].params["limit_angle"] = SAFE_FALL_ANGLE
+        cfg.rewards["nudge_target_overrun"] = RewardTermCfg(func=microduck_mdp.nudge_target_overrun, weight=SAFE_OVERRUN_WEIGHT)
     return cfg
 
 

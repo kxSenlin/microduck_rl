@@ -125,3 +125,4 @@ def test_safe_variant_makes_falls_expensive():
     cfg = make_microduck_nudge_env_cfg(runtime_layer=True, safe=True)
     assert cfg.rewards["termination"].weight <= -100.0
     assert cfg.terminations["fell_over"].params["limit_angle"] <= math.radians(45.0)
+    assert cfg.rewards["nudge_target_overrun"].weight < 0.0

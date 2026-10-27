@@ -56,6 +56,10 @@ def main():
         acts.append(sim.obs[:, 34:48].clone())
     stand_act = torch.stack(acts[50:]).mean(dim=0)
     rows, frames, marks = [], [], []
+    # commanded-target overrun (robotd clamps only to +-pi): HOME + scale x filtered action vs the joint ranges
+    act_term = sim.env.action_manager.get_term("joint_pos")
+    lim = sim.robot.data.joint_pos_limits[0, act_term._target_ids].clone()      # (14, 2)
+    overrun = torch.zeros(14)
     rec = list(range(min(a.record, a.envs)))
     t0 = time.time()
     s_first = sim.stance()
@@ -70,6 +74,8 @@ def main():
         for k in range(int(round((a.go + a.unwind) / sim.dt))):
             sim.step(cmd if k * sim.dt < a.go - 1e-6 else [0.0, 0.0, 0.0], policy=nudge, smooth=False)
             gz_max = torch.maximum(gz_max, sim.robot.data.projected_gravity_b[:, 2])
+            tgt = act_term._processed_actions
+            overrun = torch.maximum(overrun, torch.maximum(tgt - lim[:, 1], lim[:, 0] - tgt).max(dim=0).values)
             if rec: frames.append(sim.qpos(rec))
         sim.action_scale = walk_scale
         s_skill = sim.stance()
@@ -105,7 +111,10 @@ def main():
           f"handback drift {hb.mean():.1f} mm  fell {fell}/{len(f)} (max tilt p95 {np.percentile(tilt, 95):.0f} deg)  upright {up}/{len(f)}  [{time.time() - t0:.0f}s]\n"
           f"   at the skill's end: fwd {kf.mean():+.1f}±{kf.std():.1f} mm  left {kl.mean():+.1f}±{kl.std():.1f} mm  "
           f"yaw {ky.mean():+.1f}±{ky.std():.1f}°", flush=True)
-    out = {"args": vars(a), "rows": rows, "target": tgt}
+    j = int(torch.argmax(overrun))
+    print(f"   commanded targets: worst {act_term._target_names[j]} {float(overrun[j]):+.2f} rad past its limit", flush=True)
+    out = {"args": vars(a), "rows": rows, "target": tgt, "overrun_rad": overrun.tolist(),
+           "overrun_joint": act_term._target_names[j]}
     Path(a.out).write_text(json.dumps(out, default=float))
     if rec and a.npz:
         np.savez_compressed(a.npz, qpos=np.stack(frames), marks=np.array(marks), dt=sim.dt)
