@@ -25,13 +25,24 @@ def test_command_is_the_skill_timeline():
     assert 0.0 < cmd.zero_prob < 0.5
 
 
-def test_requests_stay_inside_the_walking_policys_speed_range():
-    # the actor starts from velstand (trained on |vx| <= 0.4 m/s, |wz| <= 1.0 rad/s): the largest request must read
-    # as a speed it knows
+def test_typical_requests_read_as_speeds_where_the_walking_policy_steps():
+    # run 1: 1.5 cm read as 0.15 m/s, inside velstand's dead zone, and the policy never stepped. A typical request
+    # must read as ~0.3 m/s / ~0.5 rad/s, and the largest stay near velstand's trained range (0.4 m/s, 1 rad/s).
     cfg = make_microduck_nudge_env_cfg()
     cmd = cfg.commands["twist"]
-    assert cmd.dist_range_m[1] / microduck_mdp.NUDGE_UNIT_M <= 0.4
-    assert cmd.yaw_range_rad[1] / microduck_mdp.NUDGE_UNIT_RAD <= 1.0
+    assert 0.25 <= 0.015 / microduck_mdp.NUDGE_UNIT_M <= 0.4
+    assert cmd.dist_range_m[1] / microduck_mdp.NUDGE_UNIT_M <= 0.8
+    assert cmd.yaw_range_rad[1] / microduck_mdp.NUDGE_UNIT_RAD <= 1.1
+
+
+def test_task_terms_dominate_and_smoothness_comes_later():
+    cfg = make_microduck_nudge_env_cfg()
+    r = cfg.rewards
+    assert r["nudge_hold"].weight >= 10 * r["upright"].weight / 2
+    assert r["nudge_miss"].weight < 0.0 and r["nudge_lift"].weight > 0.0
+    stages = cfg.curriculum["action_rate_weight"].params["weight_stages"]
+    assert stages[0]["step"] == 0 and stages[0]["weight"] > stages[-1]["weight"]
+    assert r["action_rate_l2"].weight == stages[0]["weight"]
 
 
 def test_walking_terms_are_gone_and_slip_is_always_priced():

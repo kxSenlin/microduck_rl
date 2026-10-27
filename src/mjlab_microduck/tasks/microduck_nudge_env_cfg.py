@@ -8,11 +8,15 @@ trains tiny pure commands); a full tap (0.4 m/s, 0.3 s) gives 59 ± 21 mm forwar
 sideways; closed loop on contact odometry asking 20 mm gives 55 ± 23 mm (it always takes >= 2 steps and keeps walking
 ~0.6 s after the stop).
 
-Contract = robotd's one-shot skill (SkillDef): twist = the requested move / NUDGE_UNIT (x, y: metres / 0.1, so
-1.5 cm = 0.15; yaw: radians / 0.5, so 7.5° = 0.26: inside the walking policy's trained speed range) for `go_s` (the
-skill's `duration`), then zeros (`unwind` = [0, 0, 0] for `unwind_s`), then the walking policy at zero command. Head
-and body slots stay zero. Deployment needs no daemon code: six (or twelve) skill entries with constant commands, e.g.
-nudge_fwd = [0.15, 0, 0], duration 0.5, unwind_s 1.3.
+Contract = robotd's one-shot skill (SkillDef): twist = the requested move / NUDGE_UNIT (x, y: metres / 0.05, so
+1.5 cm = 0.3; yaw: radians / 0.25, so 7.5° = 0.52: where the walking policy already steps) for `go_s` (the skill's
+`duration`), then zeros (`unwind` = [0, 0, 0] for `unwind_s`), then the walking policy at zero command. Head and body
+slots stay zero. Deployment needs no daemon code: six (or twelve) skill entries with constant commands, e.g.
+nudge_fwd = [0.3, 0, 0], duration 0.5, unwind_s 1.3.
+
+Run 1 (nudge-r1-1027, 2026-10-27) learned to stand still: the task terms were ~10 % of the reward mass (action rate
+alone twice them) and the requests sat in velstand's dead zone. Run 2: task terms x10, an L1 miss term, a stepping
+prior during the move, action rate eased in (-0.2 -> -1.0), larger command units.
 
 Episode: PRE_S of zero command (the duck stands as the walking policy left it), the go window, then SETTLE_S of zeros.
 The move is measured on the stance frame (feet midpoint, trunk heading) from the go onset.
@@ -32,7 +36,7 @@ from mjlab.tasks.velocity import mdp
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_ALLCOLLISIONS_ROBOT_CFG
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.microduck_velocity_env_cfg import MicroduckRlCfg, make_microduck_velocity_env_cfg
-from mjlab_microduck.tasks.microduck_velstand_env_cfg import _collapse_curricula_to_final
+from mjlab_microduck.tasks.microduck_velstand_env_cfg import NUM_STEPS_PER_ENV, _collapse_curricula_to_final
 
 PRE_S = 0.3          # standing before the go window (the start state the walking policy hands over)
 GO_S = 0.5           # robotd skill `duration`: the twist carries the request this long
@@ -45,10 +49,16 @@ YAW_RANGE_RAD = (math.radians(2.5), math.radians(15.0))
 ZERO_PROB = 0.1                       # stand still the whole episode
 
 # Rewards (per step, 50 Hz; times are from the go onset).
-PROGRESS_WEIGHT = 4.0                 # potential: sums to 4 x (initial error - final error), error unit = 1 cm / 5°
+# Reward mass (per episode, x dt 0.02): a perfect nudge earns ~13.5 from each hold term; standing still on a 1.5 cm
+# request earns ~1.4 broad, ~0 fine and pays ~2.7 of miss; upright / head tracking ~4 each either way.
+PROGRESS_WEIGHT = 40.0                # potential: sums to 40 x (initial error - final error), error unit = 1 cm / 5°
 HOLD_AFTER_S = 0.9                    # the move should be over by then (the go window is 0.5 s)
-HOLD_WEIGHT, HOLD_STD = 1.5, 1.0      # broad: gradient from ~2 cm / 10° away
-HOLD_FINE_WEIGHT, HOLD_FINE_STD = 1.5, 0.3   # sharp: 3 mm / 1.5°
+HOLD_WEIGHT, HOLD_STD = 15.0, 1.0     # broad: gradient from ~2 cm / 10° away
+HOLD_FINE_WEIGHT, HOLD_FINE_STD = 15.0, 0.3  # sharp: 3 mm / 1.5°
+MISS_WEIGHT = -2.0                    # L1 pull in the hold window, flat where the Gaussians are
+LIFT_WEIGHT, LIFT_UNTIL_S = 1.0, 0.9  # stepping prior during the move (single support), move episodes only
+POSE_WEIGHT = 0.5                     # velocity recipe 1.0: its tight standing std fights the finishing step
+ACTION_RATE_STAGES = ((0, -0.2), (1500, -0.5), (2500, -1.0))   # (iteration, weight): smoothness after discovery
 STILL_AFTER_S = 1.2
 STILL_WEIGHT = -0.5
 FEET_DOWN_WEIGHT = 0.5
@@ -72,6 +82,12 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False) -> Man
     for k in DROP_CURRICULA:
         cfg.curriculum.pop(k, None)
     _collapse_curricula_to_final(cfg)
+
+    # action rate: eased in after the stepping is discovered (the collapse above pinned the walking recipe's final -1.0)
+    cfg.rewards["action_rate_l2"].weight = ACTION_RATE_STAGES[0][1]
+    if "action_rate_weight" in cfg.curriculum:
+        cfg.curriculum["action_rate_weight"].params["weight_stages"] = [
+            {"step": it * NUM_STEPS_PER_ENV, "weight": w} for it, w in ACTION_RATE_STAGES]
 
     cfg.episode_length_s = EPISODE_S
     cfg.events.pop("push_robot", None)
@@ -118,6 +134,12 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False) -> Man
         func=mdp.feet_slip, weight=SLIP_WEIGHT,
         params={"sensor_name": "feet_ground_contact", "command_name": "twist", "command_threshold": -1.0,
                 "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))})
+    cfg.rewards["nudge_miss"] = RewardTermCfg(
+        func=microduck_mdp.nudge_miss, weight=MISS_WEIGHT, params={"command_name": "twist", "after_s": HOLD_AFTER_S})
+    cfg.rewards["nudge_lift"] = RewardTermCfg(
+        func=microduck_mdp.nudge_lift, weight=LIFT_WEIGHT,
+        params={"sensor_name": "feet_ground_contact", "command_name": "twist", "until_s": LIFT_UNTIL_S})
+    cfg.rewards["pose"].weight = POSE_WEIGHT
     cfg.rewards["termination"] = RewardTermCfg(func=envs_mdp.is_terminated, weight=TERMINATION_WEIGHT)
     cfg.rewards["nudge_metrics"] = RewardTermCfg(
         func=microduck_mdp.nudge_metrics, weight=0.0, params={"command_name": "twist"})

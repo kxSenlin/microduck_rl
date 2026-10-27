@@ -7714,14 +7714,15 @@ def roulade_lateral_velocity_penalty(
 # `duration` s, then the `unwind` twist (zeros) for `unwind_s` s, then back to
 # the walking policy. The nudge uses exactly that: twist = the requested move
 # divided by NUDGE_UNIT_M (x, y) or NUDGE_UNIT_RAD (yaw) during the go window,
-# zeros after it. The units keep every request inside the speed range the
-# walking policy (the actor's starting point) was trained on: 1.5 cm forward is
-# twist 0.15, 7.5° is 0.26. The zero edge is the policy's only clock: "finish the
+# zeros after it. The units put a typical request where the walking policy (the
+# actor's starting point) already steps: 1.5 cm forward is twist 0.3, 7.5° is
+# 0.52. Run 1 (units 0.1 m / 0.5 rad: 1.5 cm = 0.15, inside velstand's dead zone)
+# never discovered stepping. The zero edge is the policy's only clock: "finish the
 # step you are in and stand still". The move is measured on the STANCE frame
 # (feet midpoint, trunk heading), the frame the grasp is placed from.
 
-NUDGE_UNIT_M = 0.10
-NUDGE_UNIT_RAD = 0.5
+NUDGE_UNIT_M = 0.05
+NUDGE_UNIT_RAD = 0.25
 
 
 class NudgeCommand(UniformVelocityCommand):
@@ -7854,6 +7855,27 @@ def nudge_hold(env: ManagerBasedRlEnv, command_name: str = "twist", std: float =
     term = _nudge_term(env, command_name)
     on = (term.elapsed() >= after_s) & ~term.start_pending
     return torch.exp(-(term.error_norm() / std) ** 2) * on.float()
+
+
+def nudge_miss(env: ManagerBasedRlEnv, command_name: str = "twist", after_s: float = 0.9) -> torch.Tensor:
+    """Remaining error (tolerance units, L1-like: the norm itself) after `after_s`: a constant pull toward the target
+    however far it is, where the Gaussian hold terms are flat. Standing still on a 1.5 cm request costs 1.5 per step.
+    Positive quantity, negative weight."""
+    term = _nudge_term(env, command_name)
+    on = (term.elapsed() >= after_s) & ~term.start_pending
+    return torch.nan_to_num(term.error_norm() * on.float(), nan=0.0)
+
+
+def nudge_lift(env: ManagerBasedRlEnv, sensor_name: str, command_name: str = "twist", until_s: float = 0.9) -> torch.Tensor:
+    """1 while exactly one foot is off the floor during the move (go onset to `until_s`) of an episode that asks for
+    a move: a stepping prior for discovery (run 1 learned to stand still). Zero for stand-still episodes and after
+    `until_s`, so marching on the spot buys nothing once the hold terms start. Positive weight."""
+    term = _nudge_term(env, command_name)
+    found = env.scene[sensor_name].data.found
+    single = ((found > 0).sum(dim=1) == 1).float()
+    t = term.elapsed()
+    asked = (term.target.abs().sum(dim=1) > 0).float()
+    return single * asked * ((t >= 0) & (t < until_s)).float()
 
 
 def nudge_critic_obs(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
