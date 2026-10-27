@@ -7712,22 +7712,24 @@ def roulade_lateral_velocity_penalty(
 #
 # The runtime's one-shot skill contract (robotd SkillDef): a constant twist for
 # `duration` s, then the `unwind` twist (zeros) for `unwind_s` s, then back to
-# the walking policy. The nudge uses exactly that: twist = the requested move in
-# units (x, y: 1.0 = NUDGE_UNIT_M; yaw: 1.0 = NUDGE_UNIT_RAD) during the go
-# window, zeros after it. The zero edge is the policy's only clock: "finish the
+# the walking policy. The nudge uses exactly that: twist = the requested move
+# divided by NUDGE_UNIT_M (x, y) or NUDGE_UNIT_RAD (yaw) during the go window,
+# zeros after it. The units keep every request inside the speed range the
+# walking policy (the actor's starting point) was trained on: 1.5 cm forward is
+# twist 0.15, 7.5° is 0.26. The zero edge is the policy's only clock: "finish the
 # step you are in and stand still". The move is measured on the STANCE frame
 # (feet midpoint, trunk heading), the frame the grasp is placed from.
 
-NUDGE_UNIT_M = 0.02
-NUDGE_UNIT_RAD = math.radians(10.0)
+NUDGE_UNIT_M = 0.10
+NUDGE_UNIT_RAD = 0.5
 
 
 class NudgeCommand(UniformVelocityCommand):
     """Twist slots = the requested nudge for the go window, zeros after it.
 
     Per episode: with `zero_prob` no move at all (stand still); otherwise ONE
-    axis (x, y or yaw, weights `axis_probs`), a random sign and a magnitude in
-    `magnitude_range` units. Timeline: `pre_s` of zeros (standing), the go
+    axis (x, y or yaw, weights `axis_probs`), a random sign and a size in
+    `dist_range_m` (x, y) or `yaw_range_rad`. Timeline: `pre_s` of zeros (standing), the go
     window (`go_s`), zeros. The start stance is recorded at the go onset, in
     compute() (kinematics are fresh there: mjlab runs sim.forward() between
     the reset and the command compute).
@@ -7793,12 +7795,17 @@ class NudgeCommand(UniformVelocityCommand):
         units = torch.zeros(n, 3, device=self.device)
         probs = torch.tensor(self.cfg.axis_probs, device=self.device)
         axis = torch.multinomial(probs, n, replacement=True)
-        mag = torch.empty(n, device=self.device).uniform_(*self.cfg.magnitude_range)
+        u = torch.rand(n, device=self.device)
+        lo_d, hi_d = self.cfg.dist_range_m
+        lo_y, hi_y = self.cfg.yaw_range_rad
+        size = torch.where(axis == 2, lo_y + u * (hi_y - lo_y), lo_d + u * (hi_d - lo_d))
         sign = torch.where(torch.rand(n, device=self.device) < 0.5, -1.0, 1.0)
-        units[torch.arange(n, device=self.device), axis] = sign * mag
-        units[torch.rand(n, device=self.device) < self.cfg.zero_prob] = 0.0
-        self.target_units[env_ids] = units
-        self.target[env_ids] = units * torch.tensor([NUDGE_UNIT_M, NUDGE_UNIT_M, NUDGE_UNIT_RAD], device=self.device)
+        target = torch.zeros(n, 3, device=self.device)
+        target[torch.arange(n, device=self.device), axis] = sign * size
+        target[torch.rand(n, device=self.device) < self.cfg.zero_prob] = 0.0
+        self.target[env_ids] = target
+        self.target_units[env_ids] = target / torch.tensor([NUDGE_UNIT_M, NUDGE_UNIT_M, NUDGE_UNIT_RAD], device=self.device)
+        units = self.target_units[env_ids]
         self.start_pending[env_ids] = True
         self.vel_command_b[env_ids] = units if self.cfg.pre_s <= 0 else 0.0
         return {}
@@ -7819,7 +7826,8 @@ class NudgeCommandCfg(UniformVelocityCommandCfg):
     pre_s: float = 0.0                                 # zeros before the go window (standing prelude)
     go_s: float = 0.5                                  # robotd skill `duration`; unwind (zeros) after it
     axis_probs: tuple = (0.35, 0.30, 0.35)             # x, y, yaw
-    magnitude_range: tuple = (0.25, 1.5)               # units: 0.5-3 cm, 2.5-15°
+    dist_range_m: tuple = (0.005, 0.03)                # x, y moves: 0.5-3 cm
+    yaw_range_rad: tuple = (math.radians(2.5), math.radians(15.0))
     zero_prob: float = 0.1
 
     def build(self, env: ManagerBasedRlEnv) -> "NudgeCommand":
@@ -7854,7 +7862,7 @@ def nudge_critic_obs(env: ManagerBasedRlEnv, command_name: str = "twist") -> tor
     term = _nudge_term(env, command_name)
     e = term.target - term.moved()
     e = e / torch.tensor([0.01, 0.01, math.radians(5.0)], device=env.device)
-    e = torch.where(term.start_pending[:, None], term.target_units * 2.0, e)
+    e = torch.where(term.start_pending[:, None], term.target / torch.tensor([0.01, 0.01, math.radians(5.0)], device=env.device), e)
     return torch.nan_to_num(torch.cat([e, term.elapsed()[:, None]], dim=1), nan=0.0)
 
 
@@ -7864,15 +7872,16 @@ def nudge_still(
     after_s: float = 1.2,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Motion at the end of the episode: trunk linear speed (m/s, x10) squared + yaw/roll/pitch rate squared + mean
-    servo speed squared, after `after_s`. The walking policy takes over from here: it must find the duck still.
+    """Motion at the end of the episode: trunk linear speed (m/s, x10) squared + yaw/roll/pitch rate squared + 0.1 x
+    mean servo speed squared, after `after_s`. The walking policy takes over from here: it must find the duck still.
     Positive quantity, negative weight."""
     term = _nudge_term(env, command_name)
     asset: Entity = env.scene[asset_cfg.name]
     on = (term.elapsed() >= after_s).float()
     lin = (10.0 * asset.data.root_link_lin_vel_w[:, :2]).pow(2).sum(dim=1)
     ang = asset.data.root_link_ang_vel_w.pow(2).sum(dim=1)
-    jv = asset.data.joint_vel[:, _servo_joint_ids(env, asset)].pow(2).mean(dim=1)
+    # x0.1: servo jitter from the exploration noise must not outweigh the trunk being still
+    jv = 0.1 * asset.data.joint_vel[:, _servo_joint_ids(env, asset)].pow(2).mean(dim=1)
     return torch.nan_to_num((lin + ang + jv) * on, nan=0.0)
 
 

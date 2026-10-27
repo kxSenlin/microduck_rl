@@ -18,14 +18,20 @@ def test_command_is_the_skill_timeline():
     assert cmd.rel_standing_envs == 0.0 and cmd.rel_heading_envs == 0.0
     # one pure axis per episode, small moves, some stand-still episodes
     assert len(cmd.axis_probs) == 3 and math.isclose(sum(cmd.axis_probs), 1.0)
-    lo, hi = cmd.magnitude_range
-    assert 0.0 < lo < hi <= 2.0
+    lo, hi = cmd.dist_range_m
+    assert 0.0 < lo < hi <= 0.04                           # centimetres, not a walk
+    lo, hi = cmd.yaw_range_rad
+    assert 0.0 < lo < hi <= math.radians(20.0)
     assert 0.0 < cmd.zero_prob < 0.5
 
 
-def test_units_are_centimetres_and_degrees():
-    assert microduck_mdp.NUDGE_UNIT_M == 0.02
-    assert math.isclose(microduck_mdp.NUDGE_UNIT_RAD, math.radians(10.0))
+def test_requests_stay_inside_the_walking_policys_speed_range():
+    # the actor starts from velstand (trained on |vx| <= 0.4 m/s, |wz| <= 1.0 rad/s): the largest request must read
+    # as a speed it knows
+    cfg = make_microduck_nudge_env_cfg()
+    cmd = cfg.commands["twist"]
+    assert cmd.dist_range_m[1] / microduck_mdp.NUDGE_UNIT_M <= 0.4
+    assert cmd.yaw_range_rad[1] / microduck_mdp.NUDGE_UNIT_RAD <= 1.0
 
 
 def test_walking_terms_are_gone_and_slip_is_always_priced():

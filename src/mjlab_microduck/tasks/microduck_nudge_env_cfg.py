@@ -8,10 +8,11 @@ trains tiny pure commands); a full tap (0.4 m/s, 0.3 s) gives 59 ± 21 mm forwar
 sideways; closed loop on contact odometry asking 20 mm gives 55 ± 23 mm (it always takes >= 2 steps and keeps walking
 ~0.6 s after the stop).
 
-Contract = robotd's one-shot skill (SkillDef): twist = the requested move in units (x, y: 1.0 = 2 cm; yaw:
-1.0 = 10°) for `go_s` (the skill's `duration`), then zeros (`unwind` = [0, 0, 0] for `unwind_s`), then the walking
-policy at zero command. Head and body slots stay zero. Deployment needs no daemon code: six (or twelve) skill
-entries with constant commands, e.g. nudge_fwd = [0.75, 0, 0], duration 0.5, unwind_s 1.3.
+Contract = robotd's one-shot skill (SkillDef): twist = the requested move / NUDGE_UNIT (x, y: metres / 0.1, so
+1.5 cm = 0.15; yaw: radians / 0.5, so 7.5° = 0.26: inside the walking policy's trained speed range) for `go_s` (the
+skill's `duration`), then zeros (`unwind` = [0, 0, 0] for `unwind_s`), then the walking policy at zero command. Head
+and body slots stay zero. Deployment needs no daemon code: six (or twelve) skill entries with constant commands, e.g.
+nudge_fwd = [0.15, 0, 0], duration 0.5, unwind_s 1.3.
 
 Episode: PRE_S of zero command (the duck stands as the walking policy left it), the go window, then SETTLE_S of zeros.
 The move is measured on the stance frame (feet midpoint, trunk heading) from the go onset.
@@ -39,7 +40,8 @@ SETTLE_S = 1.3       # robotd skill `unwind_s`: zeros, finish the step and stand
 EPISODE_S = PRE_S + GO_S + SETTLE_S
 
 AXIS_PROBS = (0.35, 0.30, 0.35)       # x, y, yaw
-MAGNITUDE_RANGE = (0.25, 1.5)         # units: 0.5-3 cm, 2.5-15°
+DIST_RANGE_M = (0.005, 0.03)          # x, y: 0.5-3 cm
+YAW_RANGE_RAD = (math.radians(2.5), math.radians(15.0))
 ZERO_PROB = 0.1                       # stand still the whole episode
 
 # Rewards (per step, 50 Hz; times are from the go onset).
@@ -83,7 +85,8 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False) -> Man
     cfg.commands["twist"] = microduck_mdp.NudgeCommandCfg(
         **{**{k: v for k, v in vars(old).items() if k in keep}, "class_type": microduck_mdp.NudgeCommand,
            "rel_standing_envs": 0.0, "rel_heading_envs": 0.0, "resampling_time_range": (1.0e6, 1.0e6)},
-        pre_s=PRE_S, go_s=GO_S, axis_probs=AXIS_PROBS, magnitude_range=MAGNITUDE_RANGE, zero_prob=ZERO_PROB,
+        pre_s=PRE_S, go_s=GO_S, axis_probs=AXIS_PROBS, dist_range_m=DIST_RANGE_M, yaw_range_rad=YAW_RANGE_RAD,
+        zero_prob=ZERO_PROB,
     )
     head = cfg.commands["head_pose"]
     head.ranges = tuple((-0.005, 0.005) for _ in head.ranges)      # alive, ~zero
@@ -126,4 +129,4 @@ def make_microduck_nudge_env_cfg(play: bool = False, rough: bool = False) -> Man
 MicroduckNudgeRlCfg = deepcopy(MicroduckRlCfg)
 MicroduckNudgeRlCfg.experiment_name = "nudge"
 MicroduckNudgeRlCfg.run_name = "nudge"
-MicroduckNudgeRlCfg.max_iterations = 1500
+MicroduckNudgeRlCfg.max_iterations = 3000
