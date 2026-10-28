@@ -15,6 +15,7 @@ cameras at 15 fps is most of a core; four without is nothing. Most sessions do n
 
 from __future__ import annotations
 
+import os
 import socket
 import socketserver
 import struct
@@ -25,8 +26,8 @@ import numpy as np
 
 # 16:9 at a size the default offscreen framebuffer can hold — MuJoCo caps offscreen rendering at
 # the model's `<global offwidth/offheight>`, which is 640x480 unless the scene says otherwise.
-WIDTH = 640
-HEIGHT = 360
+WIDTH = int(os.environ.get("DUCK_SIM_CAMERA_WIDTH", "640"))
+HEIGHT = int(os.environ.get("DUCK_SIM_CAMERA_HEIGHT", "360"))
 
 # The sensor's rate is 30, but a rendered frame costs 12 ms and a duck that is being watched is
 # usually being watched rather than raced. 15 halves the cost for something nobody can see.
@@ -93,13 +94,25 @@ class Camera:
         fixed = np.zeros(4)
         mujoco.mju_mulQuat(fixed, model.cam_quat[self.camera], turn)
         model.cam_quat[self.camera] = fixed
-        self.renderer = mujoco.Renderer(model, height=height, width=width)
+        # **Renderer 放到第一次 render() 的线程里创建。** 它的 GL 上下文是线程绑定的；
+        # 在物理线程构造、在相机线程使用会静默失败（没有帧，也不抛给调用方）。
+        self.model = model
+        self.renderer = None
         self.width = width
         self.height = height
         self.latest: bytes | None = None
         self.lock = threading.Lock()
 
+    def _ensure_renderer(self):
+        if self.renderer is not None:
+            return
+        model = self.model
+        model.vis.global_.offwidth = max(model.vis.global_.offwidth, self.width)
+        model.vis.global_.offheight = max(model.vis.global_.offheight, self.height)
+        self.renderer = mujoco.Renderer(model, height=self.height, width=self.width)
+
     def render(self, world) -> None:
+        self._ensure_renderer()
         """Render one frame, reading `MjData` only while holding the world's lock.
 
         **`update_scene` reads the whole of `MjData`, and it runs on the step loop's thread while

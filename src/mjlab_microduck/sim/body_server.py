@@ -506,10 +506,6 @@ def run(world: World, headless: bool, viewer_kind: str = "native",
                     viewer.sync()
                 elif viser_scene is not None:
                     viser_scene.update_from_mjdata(world.data)
-            if eyes and step % passes_per_eye == 0:
-                for body in eyes:
-                    if body.camera is not None:
-                        body.camera.render(world)
     except KeyboardInterrupt:
         pass
     finally:
@@ -597,6 +593,21 @@ def main() -> None:
             frames.fps = args.camera_fps
             threading.Thread(target=frames.serve_forever, daemon=True).start()
             servers.append(frames)
+
+            # 相机渲染自己一个线程：720p 一帧约 50 ms，放在物理线程里会把
+            # 控制环拖到 20 fps 以下。世界锁只在 update_scene 的拷贝期间持有。
+            def _camera_loop(world, camera, fps):
+                interval = 1.0 / max(fps, 1)
+                while True:
+                    time.sleep(interval)
+                    try:
+                        camera.render(world)
+                    except Exception:
+                        pass
+
+            threading.Thread(
+                target=_camera_loop, args=(world, body.camera, args.camera_fps), daemon=True
+            ).start()
 
     print(f"== {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}", flush=True)
     for index in range(args.ducks):
