@@ -436,7 +436,8 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-def run(world: World, headless: bool) -> None:
+def run(world: World, headless: bool, viewer_kind: str = "native",
+        viewer_port: int = 8091) -> None:
     """Step in real time.
 
     **Real time, not as fast as possible.** The daemon's loop is wall-clock and its health gate
@@ -444,17 +445,27 @@ def run(world: World, headless: bool) -> None:
     makes every duck report unhealthy and the updater start rolling releases back.
     """
     viewer = None
+    viser_scene = None
+    viser_server = None
     if not headless:
-        try:
-            import mujoco.viewer
+        if viewer_kind == "viser":
+            import viser
+            from mjviser import ViserMujocoScene
 
-            # No side panels: this window is for watching ducks, and everything the panels would
-            # drive belongs to the daemons.
-            viewer = mujoco.viewer.launch_passive(
-                world.model, world.data, show_left_ui=False, show_right_ui=False
-            )
-        except Exception as error:
-            print(f"== no viewer ({error}); running headless", flush=True)
+            viser_server = viser.ViserServer(host="0.0.0.0", port=viewer_port)
+            viser_scene = ViserMujocoScene(viser_server, world.model, num_envs=1)
+            print(f"== viewer at http://localhost:{viewer_port}", flush=True)
+        else:
+            try:
+                import mujoco.viewer
+
+                # No side panels: this window is for watching ducks, and everything the panels would
+                # drive belongs to the daemons.
+                viewer = mujoco.viewer.launch_passive(
+                    world.model, world.data, show_left_ui=False, show_right_ui=False
+                )
+            except Exception as error:
+                print(f"== no viewer ({error}); running headless", flush=True)
 
     dt = world.model.opt.timestep
     # One control tick of world per pass: 20 ms, the same decimation `infer_policy.py` uses.
@@ -490,8 +501,11 @@ def run(world: World, headless: bool) -> None:
                 )
                 next_step = time.perf_counter()
             step += 1
-            if viewer is not None and step % passes_per_frame == 0:
-                viewer.sync()
+            if step % passes_per_frame == 0:
+                if viewer is not None:
+                    viewer.sync()
+                elif viser_scene is not None:
+                    viser_scene.update_from_mjdata(world.data)
             if eyes and step % passes_per_eye == 0:
                 for body in eyes:
                     if body.camera is not None:
@@ -501,6 +515,11 @@ def run(world: World, headless: bool) -> None:
     finally:
         if viewer is not None:
             viewer.close()
+        elif viser_server is not None:
+            try:
+                viser_server.stop()
+            except Exception:
+                pass
 
 
 def main() -> None:
@@ -510,6 +529,13 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7801, help="the first duck's port; +1 each")
     parser.add_argument("--headless", action="store_true", help="no viewer window")
+    parser.add_argument(
+        "--viewer",
+        choices=("native", "viser"),
+        default="native",
+        help="native: MuJoCo 的 GLFW 窗口；viser: 浏览器查看器",
+    )
+    parser.add_argument("--viewer-port", type=int, default=8091, help="浏览器查看器端口")
     parser.add_argument(
         "--cameras",
         default="",
@@ -577,7 +603,8 @@ def main() -> None:
         eye = f" · camera on {args.host}:{args.frame_port + index}" if index in wanted else ""
         print(f"==   duck {index}: robotd --sim {args.host}:{args.port + index}{eye}", flush=True)
 
-    run(world, headless=args.headless)
+    run(world, headless=args.headless, viewer_kind=args.viewer,
+        viewer_port=args.viewer_port)
 
 
 if __name__ == "__main__":
