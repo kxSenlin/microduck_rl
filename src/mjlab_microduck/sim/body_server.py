@@ -46,6 +46,7 @@ import json
 import socket
 import socketserver
 import threading
+import os
 import time
 from pathlib import Path
 
@@ -436,6 +437,66 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+def _camera_loop(world: World, camera: Camera, fps: int, frames: FrameServer) -> None:
+    """Render one duck's camera on its own thread, at most `fps` times a second.
+
+    A frame is tens of milliseconds; on the physics thread that would drag the 50 Hz control loop
+    down with it. `Camera.render()` takes the world lock only to copy the scene, so the draw itself
+    never blocks the step loop.
+
+    **Deadline pacing, not sleep-first.** Sleeping before rendering adds a whole interval to every
+    frame even when the render already took longer than that; the loop is only allowed to wait when
+    it is ahead of schedule. And **no readers, no rendering** — an unwatched camera costs nothing.
+    """
+    interval = 1.0 / max(fps, 1)
+    # `DUCK_SIM_CAMERA_STATS=1` prints one line every five seconds: what the renderer can actually
+    # produce, next to the rate the frame server tries to deliver.
+    stats = bool(int(os.environ.get("DUCK_SIM_CAMERA_STATS", "0")))
+    next_frame = time.perf_counter()
+    renders = 0
+    spent = 0.0
+    next_report = next_frame + 5.0
+    while True:
+        now = time.perf_counter()
+        if now < next_frame:
+            time.sleep(next_frame - now)
+        if frames.readers > 0:
+            started = time.perf_counter()
+            try:
+                camera.render(world)
+                renders += 1
+                spent += time.perf_counter() - started
+            except Exception:
+                pass
+        # The frame server's rate is only what it tries to deliver; this is what it can actually
+        # produce. One line every five seconds is enough to tell the two apart.
+        if stats and time.perf_counter() >= next_report:
+            if renders:
+                scene, draw, encode = camera.timings
+                print(
+                    f"== camera: {renders / 5.0:.1f} fps, {spent / renders * 1000.0:.1f} ms per frame"
+                    f" (scene {scene:.1f} + draw {draw:.1f} + uyvy {encode:.1f})",
+                    flush=True,
+                )
+            renders = 0
+            spent = 0.0
+            next_report = time.perf_counter() + 5.0
+        next_frame = max(next_frame + interval, time.perf_counter() + 0.001)
+
+
+def start_camera(world: World, body, args, index: int) -> FrameServer:
+    """Build one duck's head camera and the frame server that publishes it."""
+    camera = Camera(world.model, f"{body.prefix}head_camera")
+    body.camera = camera
+    frames = FrameServer((args.host, args.frame_port + index), FrameHandler)
+    frames.camera = camera
+    threading.Thread(target=frames.serve_forever, daemon=True).start()
+    threading.Thread(
+        target=_camera_loop, args=(world, camera, args.camera_fps, frames), daemon=True
+    ).start()
+    return frames
+
+
 def run(world: World, headless: bool, viewer_kind: str = "native",
         viewer_port: int = 8091) -> None:
     """Step in real time.
@@ -472,13 +533,10 @@ def run(world: World, headless: bool, viewer_kind: str = "native",
     batch = max(1, round(0.020 / dt))
     period = batch * dt
     # A frame every N passes, counted — not `data.time % 0.033`, which is float arithmetic on an
-    # accumulating value and fires when it feels like it. 30 rather than 60: `viewer.sync()` copies
+    # accumulating value and fires when it feels like it. 30 rather than 60: syncing the viewer copies
     # the scene on this thread, and with several ducks in it that is the difference between keeping
     # real time and not.
     passes_per_frame = max(1, round((1.0 / 30.0) / period))
-    # The cameras, at their own rate — slower than the viewer and far slower than physics.
-    eyes = [b for b in world.bodies if b.camera is not None]
-    passes_per_eye = max(1, round((1.0 / CAMERA_FPS) / period))
     step = 0
     next_step = time.perf_counter()
     behind = 0
@@ -587,27 +645,7 @@ def main() -> None:
         servers.append(server)
 
         if index in wanted:
-            body.camera = Camera(world.model, f"{body.prefix}head_camera")
-            frames = FrameServer((args.host, args.frame_port + index), FrameHandler)
-            frames.camera = body.camera
-            frames.fps = args.camera_fps
-            threading.Thread(target=frames.serve_forever, daemon=True).start()
-            servers.append(frames)
-
-            # 相机渲染自己一个线程：720p 一帧约 50 ms，放在物理线程里会把
-            # 控制环拖到 20 fps 以下。世界锁只在 update_scene 的拷贝期间持有。
-            def _camera_loop(world, camera, fps):
-                interval = 1.0 / max(fps, 1)
-                while True:
-                    time.sleep(interval)
-                    try:
-                        camera.render(world)
-                    except Exception:
-                        pass
-
-            threading.Thread(
-                target=_camera_loop, args=(world, body.camera, args.camera_fps), daemon=True
-            ).start()
+            servers.append(start_camera(world, body, args, index))
 
     print(f"== {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}", flush=True)
     for index in range(args.ducks):
