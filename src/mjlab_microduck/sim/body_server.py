@@ -529,6 +529,30 @@ def _quat_wxyz(matrix) -> list:
     return [w, x, y, z]
 
 
+def _object_poses(world: World) -> dict:
+    """World poses of the loose objects (free bodies that are not a duck's trunk).
+
+    They are the small props the client draws too; unlike the room they move when the duck bumps
+    them, so the page needs their truth pose with every sample.
+    """
+    trunks = {body.prefix + "trunk_base" for body in world.bodies}
+    poses = {}
+    for body_id in range(int(world.model.nbody)):
+        name = mujoco.mj_id2name(world.model, mujoco.mjtObj.mjOBJ_BODY, body_id)
+        if not name or name in trunks:
+            continue
+        address = int(world.model.body_jntadr[body_id])
+        count = int(world.model.body_jntnum[body_id])
+        joints = range(address, address + count)
+        if not any(int(world.model.jnt_type[index]) == int(mujoco.mjtJoint.mjJNT_FREE) for index in joints):
+            continue
+        poses[name] = {
+            "pos": [round(float(value), 5) for value in world.data.xpos[body_id]],
+            "quat": [round(float(value), 6) for value in world.data.xquat[body_id]],
+        }
+    return poses
+
+
 def publish_truth(path: str, world: World) -> None:
     """Write the simulator's own camera poses, for a client that draws the head view itself.
 
@@ -550,7 +574,8 @@ def publish_truth(path: str, world: World) -> None:
             "pos": [round(float(value), 5) for value in world.data.qpos[address:address + 3]],
             "quat": [round(float(value), 6) for value in world.data.qpos[address + 3:address + 7]],
         }
-    payload = {"t": round(float(world.data.time), 3), "cameras": cameras, "bodies": bodies}
+    payload = {"t": round(float(world.data.time), 3), "cameras": cameras, "bodies": bodies,
+               "objects": _object_poses(world)}
     temporary = f"{path}.tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, separators=(",", ":"))
