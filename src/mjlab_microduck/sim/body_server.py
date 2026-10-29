@@ -620,13 +620,16 @@ def run(world: World, headless: bool, viewer_kind: str = "native",
                 )
                 next_step = time.perf_counter()
             step += 1
+            if truth_path:
+                # Every pass (50 Hz), not every viewer frame: the page interpolates this pose to the
+                # display's refresh rate, and 30 Hz samples would leave visible stair-steps on a
+                # 144 Hz panel while the badge says otherwise.
+                publish_truth(truth_path, world)
             if step % passes_per_frame == 0:
                 if viewer is not None:
                     viewer.sync()
                 elif viser_scene is not None:
                     viser_scene.update_from_mjdata(world.data)
-                if truth_path:
-                    publish_truth(truth_path, world)
     except KeyboardInterrupt:
         pass
     finally:
