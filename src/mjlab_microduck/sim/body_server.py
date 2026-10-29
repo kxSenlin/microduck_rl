@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import socket
 import socketserver
 import threading
@@ -497,6 +498,60 @@ def start_camera(world: World, body, args, index: int) -> FrameServer:
     return frames
 
 
+def _quat_wxyz(matrix) -> list:
+    """Rotation matrix to scalar-first quaternion — the convention every pose on the wire uses."""
+    m = np.asarray(matrix, dtype=float).reshape(3, 3)
+    trace = m[0, 0] + m[1, 1] + m[2, 2]
+    if trace > 0.0:
+        scale = math.sqrt(trace + 1.0) * 2.0
+        w = 0.25 * scale
+        x = (m[2, 1] - m[1, 2]) / scale
+        y = (m[0, 2] - m[2, 0]) / scale
+        z = (m[1, 0] - m[0, 1]) / scale
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        scale = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+        w = (m[2, 1] - m[1, 2]) / scale
+        x = 0.25 * scale
+        y = (m[0, 1] + m[1, 0]) / scale
+        z = (m[0, 2] + m[2, 0]) / scale
+    elif m[1, 1] > m[2, 2]:
+        scale = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+        w = (m[0, 2] - m[2, 0]) / scale
+        x = (m[0, 1] + m[1, 0]) / scale
+        y = 0.25 * scale
+        z = (m[1, 2] + m[2, 1]) / scale
+    else:
+        scale = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+        w = (m[1, 0] - m[0, 1]) / scale
+        x = (m[0, 2] + m[2, 0]) / scale
+        y = (m[1, 2] + m[2, 1]) / scale
+        z = 0.25 * scale
+    return [w, x, y, z]
+
+
+def publish_truth(path: str, world: World) -> None:
+    """Write the simulator's own camera poses, for a client that draws the head view itself.
+
+    `robot.state`'s poses and odometry are the daemon's estimates — contact odometry drifts, and a
+    client that places its camera by them slowly disagrees with the picture the simulator itself
+    renders. In simulation the truth is right here. Simulator-only: a real duck has none to give.
+    """
+    cameras = {}
+    for body in world.bodies:
+        camera = getattr(body, "camera", None)
+        if camera is None or camera.camera < 0:
+            continue
+        cameras[body.prefix or "duck-a"] = {
+            "pos": [round(float(value), 5) for value in world.data.cam_xpos[camera.camera]],
+            "quat": [round(float(value), 6) for value in _quat_wxyz(world.data.cam_xmat[camera.camera])],
+        }
+    payload = {"t": round(float(world.data.time), 3), "cameras": cameras}
+    temporary = f"{path}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, separators=(",", ":"))
+    os.replace(temporary, path)
+
+
 def run(world: World, headless: bool, viewer_kind: str = "native",
         viewer_port: int = 8091) -> None:
     """Step in real time.
@@ -537,6 +592,7 @@ def run(world: World, headless: bool, viewer_kind: str = "native",
     # the scene on this thread, and with several ducks in it that is the difference between keeping
     # real time and not.
     passes_per_frame = max(1, round((1.0 / 30.0) / period))
+    truth_path = os.environ.get("DUCK_SIM_TRUTH_PATH")
     step = 0
     next_step = time.perf_counter()
     behind = 0
@@ -564,6 +620,8 @@ def run(world: World, headless: bool, viewer_kind: str = "native",
                     viewer.sync()
                 elif viser_scene is not None:
                     viser_scene.update_from_mjdata(world.data)
+                if truth_path:
+                    publish_truth(truth_path, world)
     except KeyboardInterrupt:
         pass
     finally:

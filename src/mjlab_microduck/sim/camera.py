@@ -15,7 +15,7 @@ frame servers count their readers and a camera with none renders nothing.
 
 ## Local changes (this fork)
 
-Three things differ from upstream, all additive and controlled by environment variables:
+All additive and controlled by environment variables:
 
 * `DUCK_SIM_CAMERA_WIDTH` / `DUCK_SIM_CAMERA_HEIGHT` — render size, default 640x360. The client asks
   for 1280x720 to match a real duck's default `720p30` rung; MuJoCo's offscreen framebuffer is grown
@@ -23,6 +23,14 @@ Three things differ from upstream, all additive and controlled by environment va
 * The renderer is created lazily on the first `render()`, so its OpenGL context belongs to the thread
   that will use it. Building it on the physics thread and rendering on a camera thread fails silently.
 * Rendering is skipped while `FrameServer.readers == 0`, so a duck nobody is watching costs nothing.
+* `DUCK_SIM_CAMERA_SPLIT=1` — time `mjr_render`, `mjr_readPixels` and the flip separately and print
+  them every five seconds. The WSL D3D12 path spends its time somewhere inside `Renderer.render()`,
+  and this is what tells the submission apart from the readback.
+* `DUCK_SIM_CAMERA_SHADOW` / `DUCK_SIM_CAMERA_REFLECTION` / `DUCK_SIM_CAMERA_SKYBOX` /
+  `DUCK_SIM_CAMERA_HAZE` — the camera scene's passes. Shadow and reflection default to **off**:
+  measured on the apartment at 720p, they are 126 ms of the 171 ms frame, and dropping them takes
+  the camera from 5.8 fps to 22.2 fps while the room still reads correctly. The extra passes are a
+  mapping/teleop nicety, not a control input; `=1` turns any of them back on.
 """
 
 from __future__ import annotations
@@ -45,6 +53,18 @@ HEIGHT = int(os.environ.get("DUCK_SIM_CAMERA_HEIGHT", "720"))
 # The sensor's rate is 30, but a rendered frame is expensive and a duck being watched is usually not
 # being raced. `duck-sim` passes its own `--camera-fps`; this is the fallback.
 FPS = 30
+
+# Per-frame diagnostics: where inside `Renderer.render()` the time went.
+SPLIT = bool(int(os.environ.get("DUCK_SIM_CAMERA_SPLIT", "0")))
+
+# Scene passes, for the camera only. The shadow and reflection passes are *off* by default in this
+# fork: at 720p on this machine the apartment costs 171 ms a frame with them on and 45 ms without
+# (measured with `render_bench.py`), and the room reads the same without a shadow map or a mirror
+# floor. The env vars re-enable them for a fidelity check.
+ENABLE_SHADOW = bool(int(os.environ.get("DUCK_SIM_CAMERA_SHADOW", "0")))
+ENABLE_REFLECTION = bool(int(os.environ.get("DUCK_SIM_CAMERA_REFLECTION", "0")))
+ENABLE_SKYBOX = bool(int(os.environ.get("DUCK_SIM_CAMERA_SKYBOX", "1")))
+ENABLE_HAZE = bool(int(os.environ.get("DUCK_SIM_CAMERA_HAZE", "1")))
 
 # BT.601, the same coefficients `duck_detect`'s one-pass sampler uses on the robot.
 _Y = np.array([0.299, 0.587, 0.114])
@@ -105,6 +125,10 @@ class Camera:
         # 帧服务器的读者在“有新帧”时被唤醒，而不是按固定周期重发同一张图。
         self.updated = threading.Condition(self.lock)
         self.timings: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.split: tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._split_frames = 0
+        self._split_sum = [0.0, 0.0, 0.0]
+        self._split_next = time.perf_counter() + 5.0
 
     def _ensure_renderer(self) -> None:
         if self.renderer is not None:
@@ -126,10 +150,55 @@ class Camera:
             quality.shadowsize = shadowsize
         print(
             f"== camera: {self.width}x{self.height} renderer, offsamples={quality.offsamples},"
-            f" shadowsize={quality.shadowsize}",
+            f" shadowsize={quality.shadowsize}, split={int(SPLIT)},"
+            f" shadow={int(ENABLE_SHADOW)}, reflection={int(ENABLE_REFLECTION)},"
+            f" skybox={int(ENABLE_SKYBOX)}, haze={int(ENABLE_HAZE)}",
             flush=True,
         )
         self.renderer = mujoco.Renderer(model, height=self.height, width=self.width)
+
+    def _render_pixels(self) -> np.ndarray:
+        """`Renderer.render()` with the scene passes we want, and the split timings when asked."""
+        renderer = self.renderer
+        flags = renderer._scene.flags
+        flags[mujoco.mjtRndFlag.mjRND_SHADOW] = ENABLE_SHADOW
+        flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = ENABLE_REFLECTION
+        flags[mujoco.mjtRndFlag.mjRND_SKYBOX] = ENABLE_SKYBOX
+        flags[mujoco.mjtRndFlag.mjRND_HAZE] = ENABLE_HAZE
+        if not SPLIT:
+            return renderer.render()
+
+        if renderer._gl_context:
+            renderer._gl_context.make_current()
+        out = np.empty((self.height, self.width, 3), dtype=np.uint8)
+        started = time.perf_counter()
+        mujoco.mjr_render(renderer._rect, renderer._scene, renderer._mjr_context)
+        drawn = time.perf_counter()
+        mujoco.mjr_readPixels(out, None, renderer._rect, renderer._mjr_context)
+        read = time.perf_counter()
+        if renderer._gl_context:
+            out[:] = np.flipud(out)
+        flipped = time.perf_counter()
+        self.split = (
+            (drawn - started) * 1000.0,
+            (read - drawn) * 1000.0,
+            (flipped - read) * 1000.0,
+        )
+        for index in range(3):
+            self._split_sum[index] += self.split[index]
+        self._split_frames += 1
+        if flipped >= self._split_next:
+            frames = self._split_frames
+            print(
+                f"== camera split: draw {self._split_sum[0] / frames:.1f} ms,"
+                f" read {self._split_sum[1] / frames:.1f} ms,"
+                f" flip {self._split_sum[2] / frames:.1f} ms",
+                flush=True,
+            )
+            self._split_frames = 0
+            self._split_sum = [0.0, 0.0, 0.0]
+            self._split_next = time.perf_counter() + 5.0
+        return out
 
     def render(self, world) -> None:
         """Render one frame. `update_scene` reads the whole of `MjData`, so it holds the world lock.
@@ -143,7 +212,7 @@ class Camera:
         with world.lock:
             self.renderer.update_scene(world.data, camera=self.camera)
         draw_started = time.perf_counter()
-        pixels = self.renderer.render()
+        pixels = self._render_pixels()
         encode_started = time.perf_counter()
         packed = to_uyvy(pixels)
         self.timings = (
