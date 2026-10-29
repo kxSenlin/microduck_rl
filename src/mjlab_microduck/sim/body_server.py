@@ -537,15 +537,20 @@ def publish_truth(path: str, world: World) -> None:
     renders. In simulation the truth is right here. Simulator-only: a real duck has none to give.
     """
     cameras = {}
+    bodies = {}
     for body in world.bodies:
         camera = getattr(body, "camera", None)
-        if camera is None or camera.camera < 0:
-            continue
-        cameras[body.prefix or "duck-a"] = {
-            "pos": [round(float(value), 5) for value in world.data.cam_xpos[camera.camera]],
-            "quat": [round(float(value), 6) for value in _quat_wxyz(world.data.cam_xmat[camera.camera])],
+        if camera is not None and camera.camera >= 0:
+            cameras[body.prefix or "duck-a"] = {
+                "pos": [round(float(value), 5) for value in world.data.cam_xpos[camera.camera]],
+                "quat": [round(float(value), 6) for value in _quat_wxyz(world.data.cam_xmat[camera.camera])],
+            }
+        address = int(body.trunk)
+        bodies[body.prefix or "duck-a"] = {
+            "pos": [round(float(value), 5) for value in world.data.qpos[address:address + 3]],
+            "quat": [round(float(value), 6) for value in world.data.qpos[address + 3:address + 7]],
         }
-    payload = {"t": round(float(world.data.time), 3), "cameras": cameras}
+    payload = {"t": round(float(world.data.time), 3), "cameras": cameras, "bodies": bodies}
     temporary = f"{path}.tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, separators=(",", ":"))
